@@ -119,7 +119,10 @@ where
                 TraitUseAdaptation::Alias(TraitUseAliasAdaptation {
                     method_reference,
                     r#as: self.expect_keyword(T!["as"])?,
-                    modifier: self.parse_optional_read_visibility_modifier()?,
+                    // PHP's grammar allows the full `member_modifier` set after
+                    // `as` (e.g. `foo as final bar;`), not just visibility — match
+                    // the absolute-reference branch above, which uses the same.
+                    modifier: self.parse_optional_modifier()?,
                     alias: match self.stream.peek_kind(0)? {
                         Some(T![";" | "?>"]) => None,
                         _ => Some(self.parse_local_identifier()?),
