@@ -32,12 +32,14 @@ Not ported from the source corpus:
   (`ReturnTypeProvider/Dirname`, `ReturnTypeProvider/Basename`,
   `TypeAnnotation/multilineTypeWithExtraSpace` artifacts)
 
-Run with:
+The corpus intentionally contains known-failing tests (Mago false positives
+being tracked down), so the trials are marked ignored by default to keep plain
+`cargo test --workspace` runs green. Run the corpus explicitly with:
 
 ```sh
-cargo test -p mago-analyzer --test pzoom
+cargo test -p mago-analyzer --test pzoom -- --ignored
 # or a subset:
-cargo test -p mago-analyzer --test pzoom -- TypeReconciliation/
+cargo test -p mago-analyzer --test pzoom -- --ignored TypeReconciliation/
 ```
 
 The harness lives in `../pzoom.rs`. It analyzes each `input.php` with settings

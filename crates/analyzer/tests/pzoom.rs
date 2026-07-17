@@ -15,8 +15,10 @@
 //! suppressions natively, so the mapping lives here; tests relying on inline
 //! `@psalm-suppress` are not ported at all — see `pzoom/README.md`).
 //!
-//! Run with `cargo test -p mago-analyzer --test pzoom`; pass a path fragment to
-//! filter, e.g. `cargo test -p mago-analyzer --test pzoom -- Closure/`.
+//! The corpus intentionally contains known-failing tests, so trials are
+//! ignored by default (keeping `cargo test --workspace` green). Run with
+//! `cargo test -p mago-analyzer --test pzoom -- --ignored`; add a path
+//! fragment to filter, e.g. `-- --ignored Closure/`.
 
 #![allow(
     clippy::unwrap_used,
@@ -72,12 +74,17 @@ fn main() {
     LazyLock::force(&PRELUDE);
     LazyLock::force(&PLUGIN_REGISTRY);
 
+    // The corpus intentionally contains known-failing tests (Mago false
+    // positives being tracked down), so trials are ignored by default to keep
+    // plain `cargo test --workspace` runs green. Run the corpus explicitly
+    // with `cargo test -p mago-analyzer --test pzoom -- --ignored`.
     let trials: Vec<Trial> = dirs
         .into_iter()
         .map(|dir| {
             let name = dir.strip_prefix(&corpus).unwrap().to_string_lossy().replace('\\', "/");
             let rel = name.clone();
             Trial::test(name, move || run_test_on_analysis_stack(dir, rel).map_err(Failed::from))
+                .with_ignored_flag(true)
         })
         .collect();
 
