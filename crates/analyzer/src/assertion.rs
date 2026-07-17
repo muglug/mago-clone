@@ -6,8 +6,12 @@ use mago_algebra::assertion_set::negate_assertion_set;
 use mago_codex::assertion::Assertion;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
+use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::atomic::resource::TResource;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
@@ -15,7 +19,10 @@ use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::get_array_value_parameter;
+use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::get_iterable_value_parameter;
+use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -313,23 +320,45 @@ where
 
         if let (Some(key_argument), Some(array_argument)) = (key_argument, array_argument)
             && get_expression_array_key(artifacts, key_argument).is_none()
-            && let Some(array_id) = get_expression_id(
+        {
+            let mut added_assertion = false;
+
+            if let Some(array_id) = get_expression_id(
                 array_argument,
                 assertion_context.this_class_name,
                 assertion_context.resolved_names,
                 Some(assertion_context.codebase),
-            )
-            && let Some(index_id) = get_index_id(
+            ) && let Some(index_id) = get_index_id(
                 key_argument,
                 assertion_context.this_class_name,
                 assertion_context.resolved_names,
                 Some(assertion_context.codebase),
-            )
-        {
-            let access_id = concat_word!(array_id.as_bytes(), b"[", index_id.as_bytes(), b"]");
-            if_types.insert(access_id, vec![vec![Assertion::ArrayKeyExists]]);
+            ) {
+                let access_id = concat_word!(array_id.as_bytes(), b"[", index_id.as_bytes(), b"]");
+                if_types.insert(access_id, vec![vec![Assertion::ArrayKeyExists]]);
+                added_assertion = true;
+            }
 
-            return if_types;
+            // `array_key_exists($key, $array)` also narrows the *key* variable
+            // to the array's known key union (Psalm narrows via key-of). Class
+            // constants are not variables and keep their declared type.
+            if !matches!(unwrap_expression(key_argument), Expression::Access(Access::ClassConstant(_)))
+                && let Some(key_id) = get_expression_id(
+                    key_argument,
+                    assertion_context.this_class_name,
+                    assertion_context.resolved_names,
+                    Some(assertion_context.codebase),
+                )
+                && let Some(haystack_type) = artifacts.get_expression_type(array_argument)
+                && let Some(key_union) = extract_array_key_union(haystack_type)
+            {
+                if_types.entry(key_id).or_default().push(vec![Assertion::InArray(key_union)]);
+                added_assertion = true;
+            }
+
+            if added_assertion {
+                return if_types;
+            }
         }
     }
 
@@ -507,17 +536,6 @@ where
                 Some((0, assertions))
             }
             b"in_array" => {
-                let should_strict_check = function_call
-                    .argument_list
-                    .arguments
-                    .get(2)
-                    .and_then(|argument| artifacts.get_expression_type(argument.value()))
-                    .is_some_and(mago_codex::ttype::union::TUnion::is_true);
-
-                if !should_strict_check {
-                    return None;
-                }
-
                 let checked_array = function_call
                     .argument_list
                     .arguments
@@ -528,7 +546,7 @@ where
                 let mut value_types = None;
                 for atomic in checked_array.types.as_ref() {
                     let TAtomic::Array(array) = atomic else {
-                        return None;
+                        continue;
                     };
 
                     value_types = Some(add_optional_union_type(
@@ -538,12 +556,15 @@ where
                     ));
                 }
 
-                let mut value_assertions = vec![];
-                for atomic in value_types?.types.into_owned() {
-                    value_assertions.push(Assertion::IsIdentical(atomic));
+                // A haystack of unknown values asserts nothing; `InArray` on
+                // the needle covers both the true branch and — through clause
+                // negation — the `NotInArray` false branch.
+                let value_types = value_types?;
+                if value_types.is_mixed() {
+                    return None;
                 }
 
-                Some((0, value_assertions))
+                Some((0, vec![Assertion::InArray(value_types)]))
             }
             _ => None,
         };
@@ -615,6 +636,12 @@ pub(super) fn scrape_equality_assertions<A>(
 where
     A: Arena,
 {
+    if let Some((subject_id, cast_atomic)) = get_cast_type_comparison(left, right, assertion_context) {
+        let mut if_types = WordMap::default();
+        if_types.insert(subject_id, vec![vec![Assertion::IsType(cast_atomic)]]);
+        return vec![if_types];
+    }
+
     if let Some(assertions) = scrape_class_constant_equality_assertions(
         left,
         right,
@@ -623,6 +650,12 @@ where
         false, // negated = false
     ) {
         return assertions;
+    }
+
+    if let Some((subject_id, asserted_atomic)) = get_type_check_comparison(left, right, assertion_context) {
+        let mut if_types = WordMap::default();
+        if_types.insert(subject_id, vec![vec![Assertion::IsType(asserted_atomic)]]);
+        return vec![if_types];
     }
 
     match resolve_count_comparison(left, right, artifacts, assertion_context) {
@@ -688,6 +721,51 @@ where
         );
     }
 
+    // Tail of Psalm's scrapeEqualityAssertions: `$a === $b` narrows each
+    // operand to the intersection of the two operand types (asserted as ORed
+    // equality atomics on any operand whose own type differs). Only strict
+    // comparisons narrow this way, and only on the true path — the false path
+    // falls out of formula negation.
+    if is_identity
+        && let (Some(left_type), Some(right_type)) =
+            (artifacts.get_expression_type(left), artifacts.get_expression_type(right))
+        && let Some(intersection) =
+            mago_codex::ttype::intersect_union_types(left_type, right_type, assertion_context.codebase)
+    {
+        let assertions: Vec<Assertion> =
+            intersection.types.iter().map(|atomic| Assertion::IsIdentical(atomic.clone())).collect();
+        if !assertions.is_empty() {
+            let intersection_id = intersection.get_id();
+            let mut if_types = WordMap::default();
+
+            if left_type.get_id() != intersection_id
+                && let Some(left_id) = get_expression_id(
+                    left,
+                    assertion_context.this_class_name,
+                    assertion_context.resolved_names,
+                    Some(assertion_context.codebase),
+                )
+            {
+                if_types.insert(left_id, vec![assertions.clone()]);
+            }
+
+            if right_type.get_id() != intersection_id
+                && let Some(right_id) = get_expression_id(
+                    right,
+                    assertion_context.this_class_name,
+                    assertion_context.resolved_names,
+                    Some(assertion_context.codebase),
+                )
+            {
+                if_types.insert(right_id, vec![assertions]);
+            }
+
+            if !if_types.is_empty() {
+                return vec![if_types];
+            }
+        }
+    }
+
     vec![]
 }
 
@@ -701,6 +779,12 @@ fn scrape_inequality_assertions<A>(
 where
     A: Arena,
 {
+    if let Some((subject_id, cast_atomic)) = get_cast_type_comparison(left, right, assertion_context) {
+        let mut if_types = WordMap::default();
+        if_types.insert(subject_id, vec![vec![Assertion::IsNotType(cast_atomic)]]);
+        return vec![if_types];
+    }
+
     if let Some(assertions) = scrape_class_constant_equality_assertions(
         left,
         right,
@@ -709,6 +793,12 @@ where
         true, // negated = true
     ) {
         return assertions;
+    }
+
+    if let Some((subject_id, asserted_atomic)) = get_type_check_comparison(left, right, assertion_context) {
+        let mut if_types = WordMap::default();
+        if_types.insert(subject_id, vec![vec![Assertion::IsNotType(asserted_atomic)]]);
+        return vec![if_types];
     }
 
     match resolve_count_comparison(left, right, artifacts, assertion_context) {
@@ -795,11 +885,12 @@ fn scrape_class_constant_equality_assertions<A>(
 where
     A: Arena,
 {
-    let left_class_part = is_class_constant_access(left);
-    let right_class_part = is_class_constant_access(right);
+    let left_class_part = class_identity_subject(left);
+    let right_class_part = class_identity_subject(right);
 
     let (variable_expr, class_name_expr) = match (left_class_part, right_class_part) {
-        // Case 1: Both sides are `::class` expressions (e.g., `$var::class === Foo::class`)
+        // Case 1: Both sides denote class identities (e.g., `$var::class === Foo::class`,
+        // `get_class($var) === Foo::class`)
         (Some(left_part), Some(right_part)) => {
             let left_is_static = is_static_class_reference(left_part);
             let right_is_static = is_static_class_reference(right_part);
@@ -816,11 +907,11 @@ where
                 return None;
             }
         }
-        // Case 2: Only the left side is `::class`
+        // Case 2: Only the left side is a class identity
         (Some(part), None) => (part, right),
-        // Case 3: Only the right side is `::class`
+        // Case 3: Only the right side is a class identity
         (None, Some(part)) => (part, left),
-        // Case 4: Neither side is `::class`
+        // Case 4: Neither side is a class identity
         (None, None) => return None,
     };
 
@@ -877,6 +968,44 @@ fn is_class_constant_access<'arena>(expr: &'arena Expression<'arena>) -> Option<
     }
 }
 
+/// Returns the subject whose class identity `expr` denotes: `$foo` for both
+/// `$foo::class` and `get_class($foo)` (Psalm treats the two forms alike in
+/// class-identity comparisons).
+#[inline]
+fn class_identity_subject<'arena>(expr: &'arena Expression<'arena>) -> Option<&'arena Expression<'arena>> {
+    if let Some(class_expression) = is_class_constant_access(expr) {
+        return Some(class_expression);
+    }
+
+    if let Some((function_name, function_call)) = get_global_function_call(expr)
+        && function_name.eq_ignore_ascii_case(b"get_class")
+        && function_call.argument_list.arguments.len() == 1
+        && let Some(argument) = function_call.argument_list.arguments.first()
+    {
+        return Some(argument.value());
+    }
+
+    None
+}
+
+/// If `expr` is a call to a plainly-named (optionally `\`-prefixed) function,
+/// returns the bare function name and the call.
+#[inline]
+pub(crate) fn get_global_function_call<'arena>(
+    expr: &'arena Expression<'arena>,
+) -> Option<(&'arena [u8], &'arena FunctionCall<'arena>)> {
+    if let Expression::Call(Call::Function(function_call)) = unwrap_expression(expr)
+        && let Expression::Identifier(function_identifier) = function_call.function
+    {
+        let function_name = function_identifier.value();
+        let function_name = function_name.strip_prefix(b"\\").unwrap_or(function_name);
+
+        return Some((function_name, function_call));
+    }
+
+    None
+}
+
 /// Helper to determine if the class part of a `::class` expression is a static reference.
 #[inline]
 fn is_static_class_reference(expr: &Expression) -> bool {
@@ -884,6 +1013,224 @@ fn is_static_class_reference(expr: &Expression) -> bool {
         unwrap_expression(expr),
         Expression::Identifier(_) | Expression::Self_(_) | Expression::Static(_) | Expression::Parent(_)
     )
+}
+
+/// Collects the union of keys an array-bearing union can have, for narrowing
+/// the key argument of `array_key_exists` (Psalm narrows via key-of). Returns
+/// `None` when the keys are unconstrained (mixed / no array variants).
+fn extract_array_key_union(haystack_type: &TUnion) -> Option<TUnion> {
+    let mut key_atomics: Vec<TAtomic> = vec![];
+
+    for atomic in haystack_type.types.as_ref() {
+        let TAtomic::Array(array) = atomic else {
+            continue;
+        };
+
+        match array {
+            TArray::Keyed(keyed_array) => {
+                if let Some(known_items) = &keyed_array.known_items {
+                    for key in known_items.keys() {
+                        push_loose_array_key_atomic(&mut key_atomics, key.to_atomic());
+                    }
+                }
+
+                if let Some((key_parameter, _)) = &keyed_array.parameters {
+                    for key_atomic in key_parameter.types.as_ref() {
+                        if key_atomic.is_mixed() {
+                            return None;
+                        }
+
+                        push_loose_array_key_atomic(&mut key_atomics, key_atomic.clone());
+                    }
+                }
+            }
+            TArray::List(list) => {
+                if let Some(known_elements) = &list.known_elements {
+                    for index in known_elements.keys() {
+                        push_loose_array_key_atomic(
+                            &mut key_atomics,
+                            TAtomic::Scalar(TScalar::Integer(TInteger::Literal(*index as i64))),
+                        );
+                    }
+                }
+
+                if !list.element_type.is_never() {
+                    push_loose_array_key_atomic(&mut key_atomics, TAtomic::Scalar(TScalar::Integer(TInteger::From(0))));
+                }
+            }
+        }
+    }
+
+    if key_atomics.is_empty() { None } else { Some(TUnion::from_vec(key_atomics)) }
+}
+
+/// Pushes an array-key atomic together with its loose counterparts:
+/// `array_key_exists` compares keys the way PHP coerces them, so an int key
+/// also matches its decimal string form and vice versa.
+fn push_loose_array_key_atomic(target: &mut Vec<TAtomic>, key_atomic: TAtomic) {
+    match &key_atomic {
+        TAtomic::Scalar(TScalar::Integer(integer)) => {
+            if let TInteger::Literal(value) = integer {
+                target.push(TAtomic::Scalar(TScalar::String(TString::known_literal(word(
+                    value.to_string().as_bytes(),
+                )))));
+            } else {
+                target.push(TAtomic::Scalar(TScalar::string()));
+            }
+
+            target.push(key_atomic);
+        }
+        TAtomic::Scalar(TScalar::String(string)) => {
+            if let Some(value) = string.get_known_literal_value() {
+                if let Ok(parsed) = std::str::from_utf8(value).unwrap_or_default().parse::<i64>()
+                    && parsed.to_string().as_bytes() == value
+                {
+                    target.push(TAtomic::Scalar(TScalar::Integer(TInteger::Literal(parsed))));
+                }
+            } else {
+                target.push(TAtomic::Scalar(TScalar::int()));
+            }
+
+            target.push(key_atomic);
+        }
+        _ => target.push(key_atomic),
+    }
+}
+
+/// Maps a PHP `gettype()` result string to the asserted atomic type.
+fn map_gettype_string(type_string: &[u8]) -> Option<TAtomic> {
+    Some(match type_string {
+        b"integer" => TAtomic::Scalar(TScalar::int()),
+        b"double" => TAtomic::Scalar(TScalar::float()),
+        b"boolean" => TAtomic::Scalar(TScalar::bool()),
+        b"string" => TAtomic::Scalar(TScalar::string()),
+        b"array" => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            std::sync::Arc::new(get_arraykey()),
+            std::sync::Arc::new(get_mixed()),
+        ))),
+        b"object" => TAtomic::Object(TObject::Any),
+        b"NULL" => TAtomic::Null,
+        b"resource" | b"resource (closed)" => TAtomic::Resource(TResource::new(None)),
+        _ => return None,
+    })
+}
+
+/// Maps a PHP `get_debug_type()` result string to the asserted atomic for the
+/// built-in scalar names. Class-name results are left to the general path.
+fn map_get_debug_type_string(type_string: &[u8]) -> Option<TAtomic> {
+    Some(match type_string {
+        b"int" => TAtomic::Scalar(TScalar::int()),
+        b"float" => TAtomic::Scalar(TScalar::float()),
+        b"bool" => TAtomic::Scalar(TScalar::bool()),
+        b"string" => TAtomic::Scalar(TScalar::string()),
+        b"array" => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+            std::sync::Arc::new(get_arraykey()),
+            std::sync::Arc::new(get_mixed()),
+        ))),
+        b"null" => TAtomic::Null,
+        _ => return None,
+    })
+}
+
+/// Detects `gettype($x) === "type"` / `get_debug_type($x) === "type"` (string on
+/// either side) and returns the subject variable id plus the asserted atomic.
+/// Mirrors Psalm's `getGettypeEqualityAssertions` / `getGetdebugtypeEqualityAssertions`.
+fn get_type_check_comparison<A>(
+    left: &Expression,
+    right: &Expression,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<(Word, TAtomic)>
+where
+    A: Arena,
+{
+    let resolve = |call_expr: &Expression, string_expr: &Expression| -> Option<(Word, TAtomic)> {
+        let (function_name, function_call) = get_global_function_call(call_expr)?;
+        let is_debug = if function_name.eq_ignore_ascii_case(b"gettype") {
+            false
+        } else if function_name.eq_ignore_ascii_case(b"get_debug_type") {
+            true
+        } else {
+            return None;
+        };
+
+        let subject = function_call.argument_list.arguments.first()?.value();
+        let subject_id = get_expression_id(
+            subject,
+            assertion_context.this_class_name,
+            assertion_context.resolved_names,
+            Some(assertion_context.codebase),
+        )?;
+
+        let Expression::Literal(Literal::String(string_literal)) = unwrap_expression(string_expr) else {
+            return None;
+        };
+
+        let atomic = if is_debug {
+            map_get_debug_type_string(string_literal.value?)?
+        } else {
+            map_gettype_string(string_literal.value?)?
+        };
+
+        Some((subject_id, atomic))
+    };
+
+    resolve(left, right).or_else(|| resolve(right, left))
+}
+
+/// Detects `(string) $x === $x` style cast comparisons: under `===`, equality
+/// with the cast of itself proves the operand already has the cast-target type.
+/// Mirrors Psalm's `getTypedValueComparison` cast handling.
+fn get_cast_type_comparison<A>(
+    left: &Expression,
+    right: &Expression,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<(Word, TAtomic)>
+where
+    A: Arena,
+{
+    let resolve = |cast_expr: &Expression, compared_expr: &Expression| -> Option<(Word, TAtomic)> {
+        let Expression::UnaryPrefix(unary) = unwrap_expression(cast_expr) else {
+            return None;
+        };
+
+        let cast_atomic = match unary.operator {
+            UnaryPrefixOperator::StringCast(_, _) | UnaryPrefixOperator::BinaryCast(_, _) => {
+                TAtomic::Scalar(TScalar::string())
+            }
+            UnaryPrefixOperator::IntCast(_, _) | UnaryPrefixOperator::IntegerCast(_, _) => {
+                TAtomic::Scalar(TScalar::int())
+            }
+            UnaryPrefixOperator::FloatCast(_, _)
+            | UnaryPrefixOperator::DoubleCast(_, _)
+            | UnaryPrefixOperator::RealCast(_, _) => TAtomic::Scalar(TScalar::float()),
+            UnaryPrefixOperator::BoolCast(_, _) | UnaryPrefixOperator::BooleanCast(_, _) => {
+                TAtomic::Scalar(TScalar::bool())
+            }
+            UnaryPrefixOperator::ArrayCast(_, _) => TAtomic::Array(TArray::Keyed(TKeyedArray::new_with_parameters(
+                std::sync::Arc::new(get_arraykey()),
+                std::sync::Arc::new(get_mixed()),
+            ))),
+            UnaryPrefixOperator::ObjectCast(_, _) => TAtomic::Object(TObject::Any),
+            _ => return None,
+        };
+
+        let cast_operand_id = get_expression_id(
+            unary.operand,
+            assertion_context.this_class_name,
+            assertion_context.resolved_names,
+            Some(assertion_context.codebase),
+        )?;
+        let compared_id = get_expression_id(
+            compared_expr,
+            assertion_context.this_class_name,
+            assertion_context.resolved_names,
+            Some(assertion_context.codebase),
+        )?;
+
+        if cast_operand_id == compared_id { Some((cast_operand_id, cast_atomic)) } else { None }
+    };
+
+    resolve(left, right).or_else(|| resolve(right, left))
 }
 
 fn get_empty_array_equality_assertions<A>(

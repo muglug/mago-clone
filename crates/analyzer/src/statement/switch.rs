@@ -826,11 +826,46 @@ where
                 format!("{}{}", Self::SYNTHETIC_SWITCH_VAR_PREFIX, switch.expression.span().start.offset);
             let subject_id = mago_word::word(&subject_id_str);
             self.block_context.locals.insert(subject_id, Rc::clone(subject_type));
-            let subject_for_conditions =
-                new_synthetic_variable(self.context.arena, subject_id_str.as_bytes(), switch.expression.span());
+
+            // For pure type-inspection subjects like `switch (gettype($x))` /
+            // `switch (get_class($x))`, keep the original call as the condition
+            // subject: the synthesized `gettype($x) === "..."` comparisons then
+            // narrow `$x` through the assertion finder. Other id-less subjects
+            // fall back to a synthetic variable so they are evaluated once.
+            let subject_for_conditions = if self.is_type_inspection_subject(switch.expression) {
+                switch.expression.clone()
+            } else {
+                new_synthetic_variable(self.context.arena, subject_id_str.as_bytes(), switch.expression.span())
+            };
 
             (true, subject_id, None, subject_for_conditions)
         }
+    }
+
+    /// Whether the switch subject is a side-effect-free type-inspection call
+    /// (`gettype`, `get_debug_type`, `get_class`) whose argument is assertable,
+    /// so case comparisons can narrow the inspected variable.
+    fn is_type_inspection_subject(&self, expression: &Expression<'arena>) -> bool {
+        let Some((function_name, function_call)) = crate::assertion::get_global_function_call(expression) else {
+            return false;
+        };
+
+        if !(function_name.eq_ignore_ascii_case(b"gettype")
+            || function_name.eq_ignore_ascii_case(b"get_debug_type")
+            || function_name.eq_ignore_ascii_case(b"get_class"))
+        {
+            return false;
+        }
+
+        function_call.argument_list.arguments.first().is_some_and(|argument| {
+            get_expression_id(
+                argument.value(),
+                self.block_context.scope.get_class_like_name(),
+                self.context.resolved_names,
+                Some(self.context.codebase),
+            )
+            .is_some()
+        })
     }
 
     fn update_case_exit_map(&mut self, case: &SwitchCase, case_index: usize) {

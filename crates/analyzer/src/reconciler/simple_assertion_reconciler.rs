@@ -2061,11 +2061,11 @@ where
 
 fn reconcile_in_array<A>(
     context: &mut Context<'_, '_, A>,
-    assertion: &Assertion,
+    _assertion: &Assertion,
     existing_var_type: &TUnion,
-    key: Option<&[u8]>,
-    negated: bool,
-    span: Option<&Span>,
+    _key: Option<&[u8]>,
+    _negated: bool,
+    _span: Option<&Span>,
     typed_value: &TUnion,
 ) -> TUnion
 where
@@ -2077,13 +2077,10 @@ where
         return intersection;
     }
 
-    if let Some(key) = key
-        && let Some(span) = span
-    {
-        trigger_issue_for_impossible(context, existing_var_type.get_id(), key, assertion, true, negated, span);
-    }
-
-    get_mixed()
+    // `in_array` narrowing is equality-flavored: when the needle type does not
+    // intersect the haystack values, Psalm keeps the original type and never
+    // reports redundancy (`in_array` may still match loosely at runtime).
+    existing_var_type.clone()
 }
 
 fn reconcile_has_array_key<A>(

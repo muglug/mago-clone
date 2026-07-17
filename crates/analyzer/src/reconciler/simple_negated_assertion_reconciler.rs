@@ -18,10 +18,8 @@ use mago_codex::ttype::atomic::scalar::bool::TBool;
 use mago_codex::ttype::atomic::scalar::float::TFloat;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::comparator::union_comparator;
-use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_undefined_null;
-use mago_codex::ttype::intersect_union_types;
 use mago_codex::ttype::union::TUnion;
 use mago_span::Span;
 use mago_word::ascii_lowercase_word;
@@ -1523,19 +1521,13 @@ fn reconcile_not_in_array<A>(
 where
     A: Arena,
 {
-    let intersection = intersect_union_types(typed_value, existing_var_type, context.codebase);
+    let _ = (context, assertion, key, negated, span, typed_value);
 
-    if intersection.is_some() {
-        return existing_var_type.clone();
-    }
-
-    if let Some(key) = key
-        && let Some(pos) = span
-    {
-        trigger_issue_for_impossible(context, existing_var_type.get_id(), key, assertion, true, negated, pos);
-    }
-
-    get_mixed()
+    // `!in_array` narrowing is equality-flavored: whether or not the needle
+    // type intersects the haystack values, the negation keeps the original
+    // type (removing the matched values would be unsound for non-literal
+    // haystacks, and Psalm never reports redundancy here).
+    existing_var_type.clone()
 }
 
 fn reconcile_no_array_key<A>(
