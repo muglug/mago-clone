@@ -153,14 +153,23 @@ where
     }
 
     let Some(fq_classname) = classname.fqcn else {
-        context.collector.report_with_code(
-            IssueCode::UnknownClassInstantiation,
-            Issue::error("Cannot determine the concrete class for instantiation.")
-                .with_annotation(Annotation::primary(class_expression_span).with_message("This expression resolves to an unknown or non-specific class type"))
-                .with_note("This can happen if instantiating from a variable with a general type like `object`, `class-string` (without a specific class), or `mixed`.")
-                .with_note("Without a known class, constructor arguments and type parameters cannot be validated accurately.")
-                .with_help("Use a more specific type hint for the variable (e.g., `class-string<MyClass>`, `MyClass`), or ensure it always holds a known instantiable class name."),
-        );
+        // A `class-string<T>` whose `T` is a template parameter is as specific
+        // as the type system can express: instantiating it is the idiomatic
+        // generic factory pattern, and the resulting type (the template
+        // parameter itself) is tracked precisely below. Instantiations from
+        // genuinely unspecific types (plain `string`, bare `class-string`,
+        // `class-string` of a non-class constraint, `object`, `mixed`) are
+        // still reported.
+        if !matches!(classname.origin, ResolutionOrigin::SpecificClassLikeString(TClassLikeString::Generic { .. })) {
+            context.collector.report_with_code(
+                IssueCode::UnknownClassInstantiation,
+                Issue::error("Cannot determine the concrete class for instantiation.")
+                    .with_annotation(Annotation::primary(class_expression_span).with_message("This expression resolves to an unknown or non-specific class type"))
+                    .with_note("This can happen if instantiating from a variable with a general type like `object`, `class-string` (without a specific class), or `mixed`.")
+                    .with_note("Without a known class, constructor arguments and type parameters cannot be validated accurately.")
+                    .with_help("Use a more specific type hint for the variable (e.g., `class-string<MyClass>`, `MyClass`), or ensure it always holds a known instantiable class name."),
+            );
+        }
 
         argument_list.analyze(context, block_context, artifacts)?;
 
