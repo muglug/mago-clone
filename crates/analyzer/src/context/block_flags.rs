@@ -21,6 +21,7 @@ impl BlockContextFlags {
     pub const COLLECT_INITIALIZATIONS: u32 = 1 << 15;
     pub const CALLS_PARENT_CONSTRUCTOR: u32 = 1 << 16;
     pub const INSIDE_PIPE_CALLABLE: u32 = 1 << 17;
+    pub const INSIDE_OUT_PARAMETER_REFERENCE: u32 = 1 << 18;
 
     #[inline]
     pub const fn new() -> Self {
@@ -139,6 +140,15 @@ impl BlockContextFlags {
         self.contains(Self::INSIDE_PIPE_CALLABLE)
     }
 
+    /// Whether the expression being analyzed is an argument for a
+    /// by-reference parameter that is a pure out parameter: it declares a
+    /// `@param-out` type but no input type, so the callee never reads the
+    /// incoming value (e.g. `preg_match`'s `$matches`).
+    #[inline(always)]
+    pub const fn inside_out_parameter_reference(&self) -> bool {
+        self.contains(Self::INSIDE_OUT_PARAMETER_REFERENCE)
+    }
+
     #[inline(always)]
     pub fn set_inside_conditional(&mut self, value: bool) {
         self.set(Self::INSIDE_CONDITIONAL, value);
@@ -227,5 +237,10 @@ impl BlockContextFlags {
     #[inline(always)]
     pub fn set_inside_pipe_callable(&mut self, value: bool) {
         self.set(Self::INSIDE_PIPE_CALLABLE, value);
+    }
+
+    #[inline(always)]
+    pub fn set_inside_out_parameter_reference(&mut self, value: bool) {
+        self.set(Self::INSIDE_OUT_PARAMETER_REFERENCE, value);
     }
 }

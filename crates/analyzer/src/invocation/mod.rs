@@ -401,6 +401,25 @@ impl<'ctx> InvocationTargetParameter<'ctx> {
         }
     }
 
+    /// Checks if passing a previously undefined variable to this by-reference
+    /// parameter is acceptable. An undefined variable arrives as `null`, so
+    /// this holds when the parameter has no declared input type (out-only
+    /// parameters like `preg_match`'s `$matches`), accepts `null`, or could be
+    /// omitted entirely (has a default). Parameters with a non-nullable input
+    /// type (e.g. `sort`'s `array &$array`) still warrant the hint: the callee
+    /// reads the incoming value.
+    #[inline]
+    pub fn allows_undefined_reference_argument(&self) -> bool {
+        if !self.is_by_reference() {
+            return false;
+        }
+
+        match self.get_type() {
+            None => true,
+            Some(in_type) => in_type.is_nullable() || in_type.is_mixed() || self.has_default(),
+        }
+    }
+
     /// Checks if the parameter is variadic (`...`).
     #[inline]
     pub const fn is_variadic(&self) -> bool {
