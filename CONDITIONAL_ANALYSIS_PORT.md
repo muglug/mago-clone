@@ -4,7 +4,7 @@ Status: in progress — the first migration rounds have landed on this branch.
 Companion to the pzoom should-pass corpus in `crates/analyzer/tests/pzoom/`,
 which is the measurement harness for this work (baseline when this study was
 written: **868 of 4021 corpus tests failing**; after the rounds below:
-**854 failing / 3167 passing**, zero regressions in the analyzer's own
+**853 failing / 3168 passing**, zero regressions in the analyzer's own
 2410-case suite).
 
 Landed so far:
@@ -24,12 +24,23 @@ Landed so far:
   `disjoin_clauses`), and Psalm's practical statement-level `&&`/`||` merge
   semantics for conditional assignments.
 
-Still open from the plan: `IsLooselyEqual` assertion variants, the reconciler
-grafts (EmissionMode/docblock-provenance reporting, ancestor template
-inference, `get_value_for_key` reach, trait-`$this`), dependent-type atomics
-for indirect `get_class`/`gettype` flows, assigned-type threading through
-conjunction chains (`assertVarRedefinedInOpWithAnd`), `removed_var_ids`, and
-the reference-constraint branch-carry.
+- Reconciler round: pzoom's per-assertion redundancy-emission gate
+  (`should_emit_redundant_issue_for_unchanged_assertion`) on the shared
+  `get_acceptable_type` reporting path; ancestor-walking template inference
+  when narrowing a parameterless class assertion against an existing generic;
+  post-assignment truths exempted from conflicting-clause invalidation in
+  `&&` chains and from `find_expression_logic_issues` re-reporting (fixes
+  `is_string($v) && (($v = new O) !== null) && $v->foo()`).
+
+Still open from the plan: `IsLooselyEqual` assertion variants, inline-site
+redundancy gating (the corpus's redundant/impossible FPs flow through
+per-function trigger sites, not the shared path), docblock-provenance issue
+splitting, `get_value_for_key` reach (method-call memo keys, ArrayAccess,
+class-string-map), trait-`$this` handling, dependent-type atomics for
+indirect `get_class`/`gettype` flows, pzoom's or-replay machinery for
+conditionally-assigned vars in else branches
+(`maintainTruthinessInsideAssignment`), `removed_var_ids`, and the
+reference-constraint branch-carry.
 
 ## Verdict
 
