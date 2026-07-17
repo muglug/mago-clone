@@ -1,11 +1,35 @@
 # Porting pzoom's conditional analysis to Mago — feasibility study
 
-Status: assessment (no code changes). Companion to the pzoom should-pass corpus
-in `crates/analyzer/tests/pzoom/` on this branch, which is the measurement
-harness for any of this work (baseline at time of writing: **868 of 4021
-corpus tests failing**, of which TypeReconciliation 143, Template 140,
-AssertAnnotation 41, Loop 21 — conditional analysis is the single biggest
-failure driver).
+Status: in progress — the first migration rounds have landed on this branch.
+Companion to the pzoom should-pass corpus in `crates/analyzer/tests/pzoom/`,
+which is the measurement harness for this work (baseline when this study was
+written: **868 of 4021 corpus tests failing**; after the rounds below:
+**854 failing / 3167 passing**, zero regressions in the analyzer's own
+2410-case suite).
+
+Landed so far:
+
+- Phase 3 flow fidelity: Psalm-faithful
+  `getDefinitelyEvaluatedExpression{AfterIf,InsideIf}` (strip `=== true`,
+  `&&`-only descent, `!` swap) and branch-intersection of
+  `assigned_variable_ids` in `update_if_scope`.
+- Phase 1 detectors: `get_class()`/`gettype()`/`get_debug_type()` comparisons
+  (including `switch` subjects), cast comparisons, `$a === $b` intersection
+  narrowing of both operands, ungated `in_array` via `InArray`/`NotInArray`,
+  and `array_key_exists` key-of narrowing with loose int/string key coercion
+  (plus Psalm-semantics fixes to InArray/NotInArray reconciliation).
+- Phase 0 algebra: `Clause::redefined_vars` end-to-end (marked from
+  assignments in leaf conditionals, superseding in
+  `find_satisfying_assignments`, pre-assignment-fact dropping in
+  `disjoin_clauses`), and Psalm's practical statement-level `&&`/`||` merge
+  semantics for conditional assignments.
+
+Still open from the plan: `IsLooselyEqual` assertion variants, the reconciler
+grafts (EmissionMode/docblock-provenance reporting, ancestor template
+inference, `get_value_for_key` reach, trait-`$this`), dependent-type atomics
+for indirect `get_class`/`gettype` flows, assigned-type threading through
+conjunction chains (`assertVarRedefinedInOpWithAnd`), `removed_var_ids`, and
+the reference-constraint branch-carry.
 
 ## Verdict
 
