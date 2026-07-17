@@ -45,6 +45,6 @@ cargo test -p mago-analyzer --test pzoom -- --ignored TypeReconciliation/
 The harness lives in `../pzoom.rs`. It analyzes each `input.php` with settings
 approximating Psalm's test defaults (no unused-code analysis outside the
 `UnusedVariable/` and `UnusedCode/` suites, property-initialization checks on,
-`#[Override]` enforcement only for `Override/`), and maps `error_levels.json`
-entries onto Mago issue codes, since Mago does not honor Psalm suppressions
-natively.
+`#[Override]` enforcement only for `Override/`), applies Mago's normal
+error-level failure threshold, and maps `error_levels.json` entries onto Mago
+issue codes, since Mago does not honor Psalm suppressions natively.

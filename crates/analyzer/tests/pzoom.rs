@@ -56,6 +56,7 @@ use mago_database::file::File;
 use mago_names::resolver::NameResolver;
 use mago_php_version::PHPVersion;
 use mago_prelude::Prelude;
+use mago_reporting::Level;
 use mago_syntax::parser::parse_file;
 use mago_word::WordSet;
 
@@ -166,6 +167,13 @@ fn run_test(dir: &Path, rel: &str) -> Result<(), String> {
 
     let mut remaining: Vec<String> = Vec::new();
     for issue in issues {
+        // Match `mago analyze`'s default failure threshold. Warnings, help,
+        // and notes are still useful diagnostics, but they do not make an
+        // analysis-mode run fail.
+        if issue.level < Level::Error {
+            continue;
+        }
+
         let code = issue.code.as_deref().unwrap_or("<uncoded>").to_string();
         if is_suppressed(&code, &suppressed) {
             continue;
