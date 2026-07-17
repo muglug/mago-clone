@@ -41,7 +41,13 @@ memchr = { workspace = true }
 mago-prelude = { workspace = true, features = ["build"] }
 indoc = { workspace = true }
 criterion = { workspace = true }
+libtest-mimic = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "cases"
+harness = false
+
+[[test]]
+name = "pzoom"
 harness = false
