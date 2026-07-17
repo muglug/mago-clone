@@ -116,7 +116,16 @@ where
     );
 
     if !left_block_context.parent_conflicting_clause_variables.is_empty() {
-        left_assertions.retain(|var_id, _| !left_block_context.parent_conflicting_clause_variables.contains(var_id));
+        // Facts from clauses that *redefined* the variable describe its
+        // post-assignment value and stay valid; only pre-assignment facts are
+        // invalidated by a conflicting assignment.
+        let redefined_in_left: WordSet =
+            simplified_clauses.iter().flat_map(|clause| clause.redefined_vars.iter().copied()).collect();
+
+        left_assertions.retain(|var_id, _| {
+            redefined_in_left.contains(var_id)
+                || !left_block_context.parent_conflicting_clause_variables.contains(var_id)
+        });
     }
 
     let mut changed_var_ids = WordSet::default();
@@ -290,7 +299,6 @@ where
 {
     let mut left_block_context;
     let mut left_referenced_var_ids;
-    let left_assigned_var_ids;
 
     if is_logical_or_operation(binary.lhs, 3) {
         let pre_referenced_var_ids = block_context.conditionally_referenced_variable_ids.clone();
@@ -334,7 +342,7 @@ where
         left_referenced_var_ids = left_block_context.conditionally_referenced_variable_ids.clone();
         left_block_context.conditionally_referenced_variable_ids.extend(pre_referenced_var_ids);
 
-        left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
+        let left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
         left_block_context.assigned_variable_ids.extend(pre_assigned_var_ids);
 
         left_referenced_var_ids.retain(|id| !left_assigned_var_ids.contains_key(id));
@@ -345,7 +353,6 @@ where
             conditional::analyze(context, block_context.clone(), artifacts, &mut if_scope, binary.lhs, false)?;
         *block_context = applied_block_context;
 
-        left_assigned_var_ids = if_conditional_scope.assigned_in_conditional_variable_ids.clone();
         left_block_context = if_conditional_scope.if_body_context;
         left_referenced_var_ids = if_conditional_scope.conditionally_referenced_variable_ids;
     }

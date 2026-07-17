@@ -377,6 +377,15 @@ pub fn find_expression_logic_issues<'ctx, 'arena, A>(
         &mut cond_referenced_var_ids,
     );
 
+    // Variables reassigned inside the expression already hold their
+    // post-assignment values in this context, so re-applying those facts is
+    // definitionally redundant — never report on them here.
+    for clause in &expression_clauses {
+        for redefined_var in &clause.redefined_vars {
+            cond_referenced_var_ids.remove(redefined_var);
+        }
+    }
+
     reconcile_keyed_types(
         context,
         &reconcilable_if_types,

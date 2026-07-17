@@ -23,6 +23,8 @@ use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::combiner::CombinerOptions;
+use mago_codex::ttype::comparator::ComparisonResult;
+use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
@@ -1271,6 +1273,92 @@ where
     };
 
     Some(property_type)
+}
+
+/// Whether an assertion that changed nothing warrants a redundancy report.
+///
+/// Psalm's sub-reconcilers only conclude REDUNDANT for specific assertion
+/// shapes; everything else stays silent when the type is unchanged (the check
+/// may still discriminate at runtime, or the reconciliation is deliberately
+/// imprecise). Ported from pzoom's
+/// `should_emit_redundant_issue_for_unchanged_assertion`.
+pub(crate) fn should_emit_redundant_issue_for_unchanged_assertion<A>(
+    context: &Context<'_, '_, A>,
+    assertion: &Assertion,
+    existing_var_type: &TUnion,
+) -> bool
+where
+    A: Arena,
+{
+    match assertion {
+        Assertion::Truthy | Assertion::NonEmpty => existing_var_type.is_always_truthy(),
+        Assertion::Falsy | Assertion::Empty => existing_var_type.is_always_falsy(),
+        // Psalm's negated reconciliation of int ranges and derived string
+        // subtypes carries no redundancy report: re-deriving `!($x > 16)` or a
+        // folded `¬numeric-string` against an already-narrowed type stays
+        // silent.
+        Assertion::IsNotType(TAtomic::Scalar(TScalar::Integer(_))) => false,
+        Assertion::IsNotType(TAtomic::Array(_)) => false,
+        Assertion::IsNotType(TAtomic::Scalar(TScalar::String(string))) if !string.is_boring() => false,
+        // A numeric check is only redundant when every member is already a
+        // pure int/float value type; strings (even numeric literals) keep the
+        // runtime check discriminating.
+        Assertion::IsType(TAtomic::Scalar(TScalar::Numeric)) => {
+            !existing_var_type.types.is_empty()
+                && existing_var_type
+                    .types
+                    .iter()
+                    .all(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::Integer(_) | TScalar::Float(_))))
+        }
+        Assertion::IsType(asserted_atomic) => {
+            let mut comparison_result = ComparisonResult::new();
+            union_comparator::is_contained_by(
+                context.codebase,
+                existing_var_type,
+                &wrap_atomic(asserted_atomic.clone()),
+                false,
+                false,
+                true,
+                &mut comparison_result,
+            )
+        }
+        Assertion::IsNotType(asserted_atomic) => !union_comparator::can_expression_types_be_identical(
+            context.codebase,
+            existing_var_type,
+            &wrap_atomic(asserted_atomic.clone()),
+            true,
+            false,
+        ),
+        Assertion::IsIdentical(asserted_atomic) | Assertion::IsEqual(asserted_atomic) => {
+            existing_var_type.types.len() == 1
+                && existing_var_type.types.first().is_some_and(|existing_atomic| existing_atomic == asserted_atomic)
+        }
+        Assertion::IsNotIdentical(asserted_atomic) | Assertion::IsNotEqual(asserted_atomic) => {
+            !union_comparator::can_expression_types_be_identical(
+                context.codebase,
+                existing_var_type,
+                &wrap_atomic(asserted_atomic.clone()),
+                true,
+                false,
+            )
+        }
+        // Psalm's reconcileArrayKeyExists never calls triggerIssueForImpossible,
+        // so array_key_exists() checks are never reported as redundant.
+        Assertion::ArrayKeyExists | Assertion::ArrayKeyDoesNotExist => false,
+        // `count($x) >= n` is redundant only when the value is provably already
+        // at least that long.
+        Assertion::HasAtLeastCount(count) => existing_var_type
+            .types
+            .iter()
+            .all(|atomic| if let TAtomic::Array(array) = atomic { array.get_minimum_size() >= *count } else { false }),
+        Assertion::DoesNotHasAtLeastCount(_) => false,
+        Assertion::InArray(_) | Assertion::NotInArray(_) => false,
+        Assertion::IsLessThan(_)
+        | Assertion::IsLessThanOrEqual(_)
+        | Assertion::IsGreaterThan(_)
+        | Assertion::IsGreaterThanOrEqual(_) => false,
+        _ => false,
+    }
 }
 
 pub(crate) fn trigger_issue_for_impossible<A>(

@@ -2566,7 +2566,14 @@ where
     A: Arena,
 {
     if trigger_issue
-        && (acceptable_types.is_empty() || !did_remove_type)
+        && (acceptable_types.is_empty()
+            || (!did_remove_type
+                && !assertion.has_equality()
+                && crate::reconciler::should_emit_redundant_issue_for_unchanged_assertion(
+                    context,
+                    assertion,
+                    existing_var_type,
+                )))
         && let Some(key) = key
         && let Some(span) = span
     {

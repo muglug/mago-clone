@@ -6,6 +6,8 @@ use ryu::Buffer as FloatBuffer;
 
 use mago_allocator::Arena;
 use mago_codex::assertion::Assertion;
+use mago_codex::metadata::CodebaseMetadata;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
@@ -779,8 +781,20 @@ where
         && let TAtomic::Object(TObject::Named(super_named_object)) = super_atomic
         && let Some(super_type_parameters) = super_named_object.get_type_parameters()
     {
+        // Reconstruct the asserted class's own parameters from the existing
+        // generic's parameters by walking the extended-parameter maps; a plain
+        // positional copy is wrong whenever template order or arity changes
+        // across the hierarchy.
+        let inferred_type_parameters = infer_template_parameters_from_ancestor(
+            context.codebase,
+            named_object.name,
+            super_named_object.name,
+            super_type_parameters,
+        )
+        .unwrap_or_else(|| super_type_parameters.to_vec());
+
         return Some(TAtomic::Object(TObject::Named(
-            TNamedObject::new(named_object.name).with_type_parameters(Some(super_type_parameters.to_vec())),
+            TNamedObject::new(named_object.name).with_type_parameters(Some(inferred_type_parameters)),
         )));
     }
 
@@ -800,6 +814,86 @@ where
     }
 
     Some(sub_atomic.clone())
+}
+
+/// Reconstructs `sub_class`'s own template parameters from a supertype's
+/// parameters by propagating through the extended-parameter maps to a
+/// fixpoint (Psalm's ancestor template inference: narrowing `Collection<int>`
+/// with `instanceof ArrayList` infers `ArrayList<int>` even though the
+/// assertion mentions no parameters).
+fn infer_template_parameters_from_ancestor(
+    codebase: &CodebaseMetadata,
+    sub_class: Word,
+    super_class: Word,
+    super_type_parameters: &[TUnion],
+) -> Option<Vec<TUnion>> {
+    let sub_metadata = codebase.get_class_like(sub_class.as_bytes())?;
+    let super_metadata = codebase.get_class_like(super_class.as_bytes())?;
+
+    if sub_metadata.template_types.is_empty() {
+        return None;
+    }
+
+    // Seed: the supertype's own templates resolve to the asserted parameters.
+    let mut replacements: BTreeMap<(Word, GenericParent), TUnion> = BTreeMap::new();
+    for (index, (template_name, template)) in super_metadata.template_types.iter().enumerate() {
+        if let Some(parameter) = super_type_parameters.get(index) {
+            replacements.insert((*template_name, template.defining_entity), parameter.clone());
+        }
+    }
+
+    if replacements.is_empty() {
+        return None;
+    }
+
+    // Propagate: whenever an ancestor template with a known replacement is
+    // mapped (via `@extends`/`@implements`) to another template parameter,
+    // that parameter takes the replacement.
+    loop {
+        let mut changed = false;
+
+        for (ancestor_class, template_map) in &sub_metadata.template_extended_parameters {
+            for (ancestor_template, mapped_type) in template_map {
+                let Some(ancestor_replacement) =
+                    replacements.get(&(*ancestor_template, GenericParent::ClassLike(*ancestor_class))).cloned()
+                else {
+                    continue;
+                };
+
+                for mapped_atomic in mapped_type.types.as_ref() {
+                    let TAtomic::GenericParameter(parameter) = mapped_atomic else {
+                        continue;
+                    };
+
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        replacements.entry((parameter.parameter_name, parameter.defining_entity))
+                    {
+                        entry.insert(ancestor_replacement.clone());
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if !changed {
+            break;
+        }
+    }
+
+    let mut resolved_any = false;
+    let inferred = sub_metadata
+        .template_types
+        .iter()
+        .map(|(template_name, template)| match replacements.get(&(*template_name, template.defining_entity)) {
+            Some(replacement) => {
+                resolved_any = true;
+                replacement.clone()
+            }
+            None => template.constraint.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    if resolved_any { Some(inferred) } else { None }
 }
 
 fn get_missing_type(assertion: &Assertion, key: Option<&[u8]>, inside_loop: bool) -> TUnion {
