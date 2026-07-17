@@ -1553,8 +1553,10 @@ where
     let mut did_remove_type = existing_var_type.possibly_undefined_from_try();
     let mut new_var_type = existing_var_type.clone();
     let mut acceptable_types = vec![];
+    let mut eliminated_definite_variant = false;
 
     for mut atomic in new_var_type.types.to_mut().drain(..) {
+        let mut keep = true;
         match &mut atomic {
             TAtomic::Array(TArray::Keyed(TKeyedArray { known_items, parameters, .. })) => {
                 if let Some(known_items) = known_items {
@@ -1563,7 +1565,11 @@ where
                             known_items.remove(key_name);
                             did_remove_type = true;
                         } else {
-                            // entry is non-optional and present; assertion can't remove it
+                            // The entry is non-optional: this variant always has the
+                            // key, so the assertion eliminates the variant entirely.
+                            eliminated_definite_variant = true;
+                            did_remove_type = true;
+                            keep = false;
                         }
                     } else if let Some((key_parameter, _)) = parameters
                         && union_comparator::can_expression_types_be_identical(
@@ -1591,8 +1597,6 @@ where
                 } else {
                     // no known items and parameters don't admit this key; nothing to remove
                 }
-
-                acceptable_types.push(atomic);
             }
             TAtomic::Array(TArray::List(TList { known_elements, element_type, .. })) => {
                 if let ArrayKey::Integer(i) = key_name {
@@ -1602,7 +1606,11 @@ where
                                 known_elements.remove(&(*i as usize));
                                 did_remove_type = true;
                             } else {
-                                // element is non-optional and present; assertion can't remove it
+                                // The element is non-optional: this variant always has
+                                // the index, so the assertion eliminates the variant.
+                                eliminated_definite_variant = true;
+                                did_remove_type = true;
+                                keep = false;
                             }
                         } else if !element_type.is_never() {
                             did_remove_type = true;
@@ -1615,12 +1623,11 @@ where
                         // no known elements and the element type is never; nothing to remove
                     }
                 }
-
-                acceptable_types.push(atomic);
             }
             TAtomic::GenericParameter(generic_parameter) => {
+                keep = false;
                 if generic_parameter.constraint.is_mixed() {
-                    acceptable_types.push(atomic);
+                    acceptable_types.push(atomic.clone());
                 } else if let Some(atomic) = map_generic_constraint(generic_parameter, |constraint| {
                     reconcile_no_array_key(context, assertion, constraint, None, None, key_name, negated)
                 }) {
@@ -1633,16 +1640,37 @@ where
             }
             TAtomic::Mixed(_) => {
                 did_remove_type = true;
-                acceptable_types.push(atomic);
             }
             TAtomic::Object(TObject::Named(_)) => {
                 did_remove_type = true;
-                acceptable_types.push(atomic);
             }
             _ => {
                 did_remove_type = true;
+                keep = false;
             }
         }
+
+        if keep {
+            acceptable_types.push(atomic);
+        }
+    }
+
+    // When every variant always has the key, the negative check is impossible.
+    // Route through the "nothing removed" path so the impossible-key issue is
+    // reported and the resulting type collapses to `never`.
+    if acceptable_types.is_empty() && eliminated_definite_variant {
+        return get_acceptable_type(
+            context,
+            vec![],
+            false,
+            key,
+            span,
+            existing_var_type,
+            assertion,
+            negated,
+            true,
+            new_var_type,
+        );
     }
 
     get_acceptable_type(
