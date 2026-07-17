@@ -12,6 +12,7 @@ use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_syntax::cst::BinaryOperator;
 use mago_syntax::cst::Expression;
+use mago_syntax::cst::Literal;
 use mago_syntax::cst::UnaryPrefixOperator;
 use mago_word::Word;
 use mago_word::WordMap;
@@ -210,6 +211,10 @@ where
     ))
 }
 
+/// Mirrors Psalm's `IfConditionalAnalyzer::getDefinitelyEvaluatedExpressionAfterIf`:
+/// the sub-expression that is definitely evaluated no matter which way the
+/// condition goes — `=== true`/`== true` wrappers are stripped, `&&`/`and`/`xor`
+/// descend into their left operand, and `!` swaps to the inside-if variant.
 fn get_definitely_evaluated_expression_after_if<'ast, 'arena>(
     condition: &'ast Expression<'arena>,
 ) -> &'ast Expression<'arena> {
@@ -217,12 +222,20 @@ fn get_definitely_evaluated_expression_after_if<'ast, 'arena>(
         Expression::Parenthesized(p) => {
             return get_definitely_evaluated_expression_after_if(p.expression);
         }
+        Expression::Binary(binary)
+            if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::Identical(_)) =>
+        {
+            if is_true_literal(binary.lhs) {
+                return get_definitely_evaluated_expression_after_if(binary.rhs);
+            }
+            if is_true_literal(binary.rhs) {
+                return get_definitely_evaluated_expression_after_if(binary.lhs);
+            }
+
+            return condition;
+        }
         Expression::Binary(binary) => {
-            if let BinaryOperator::Or(_)
-            | BinaryOperator::LowOr(_)
-            | BinaryOperator::And(_)
-            | BinaryOperator::LowAnd(_) = binary.operator
-            {
+            if let BinaryOperator::And(_) | BinaryOperator::LowAnd(_) | BinaryOperator::LowXor(_) = binary.operator {
                 return get_definitely_evaluated_expression_after_if(binary.lhs);
             }
 
@@ -243,6 +256,9 @@ fn get_definitely_evaluated_expression_after_if<'ast, 'arena>(
     condition
 }
 
+/// Mirrors Psalm's `IfConditionalAnalyzer::getDefinitelyEvaluatedExpressionInsideIf`:
+/// like the after-if variant, but descending the left operand of `||`/`or`/`xor`
+/// (the expression definitely evaluated before any statement in the if body).
 fn get_definitely_evaluated_expression_inside_if<'ast, 'arena>(
     condition: &'ast Expression<'arena>,
 ) -> &'ast Expression<'arena> {
@@ -250,8 +266,20 @@ fn get_definitely_evaluated_expression_inside_if<'ast, 'arena>(
         Expression::Parenthesized(p) => {
             return get_definitely_evaluated_expression_inside_if(p.expression);
         }
+        Expression::Binary(binary)
+            if matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::Identical(_)) =>
+        {
+            if is_true_literal(binary.lhs) {
+                return get_definitely_evaluated_expression_inside_if(binary.rhs);
+            }
+            if is_true_literal(binary.rhs) {
+                return get_definitely_evaluated_expression_inside_if(binary.lhs);
+            }
+
+            return condition;
+        }
         Expression::Binary(binary) => {
-            if let BinaryOperator::Or(_) | BinaryOperator::LowOr(_) = binary.operator {
+            if let BinaryOperator::Or(_) | BinaryOperator::LowOr(_) | BinaryOperator::LowXor(_) = binary.operator {
                 return get_definitely_evaluated_expression_inside_if(binary.lhs);
             }
 
@@ -259,7 +287,7 @@ fn get_definitely_evaluated_expression_inside_if<'ast, 'arena>(
         }
         Expression::UnaryPrefix(unary) => {
             if let UnaryPrefixOperator::Not(_) = unary.operator {
-                let inner_expression = get_definitely_evaluated_expression_inside_if(unary.operand);
+                let inner_expression = get_definitely_evaluated_expression_after_if(unary.operand);
 
                 if inner_expression != unary.operand {
                     return inner_expression;
@@ -270,6 +298,14 @@ fn get_definitely_evaluated_expression_inside_if<'ast, 'arena>(
     }
 
     condition
+}
+
+fn is_true_literal(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Parenthesized(p) => is_true_literal(p.expression),
+        Expression::Literal(Literal::True(_)) => true,
+        _ => false,
+    }
 }
 
 pub fn handle_paradoxical_condition<T, A>(context: &mut Context<'_, '_, A>, expression: &T, expression_type: &TUnion)

@@ -1391,7 +1391,11 @@ fn update_if_scope<'ctx, A>(
 
     match &mut if_scope.assigned_variable_ids {
         Some(assigned_variable_ids) => {
-            assigned_variable_ids.extend(new_assigned_variable_ids);
+            // A variable counts as assigned by the if statement only when every
+            // branch assigns it (Psalm intersects here; unioning would let a
+            // single-branch assignment mask the other branches' narrowing).
+            assigned_variable_ids
+                .retain(|variable_id, _| new_assigned_variable_ids.contains_key(variable_id));
         }
         None => {
             if_scope.assigned_variable_ids = Some(new_assigned_variable_ids);
