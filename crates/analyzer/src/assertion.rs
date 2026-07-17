@@ -4,15 +4,15 @@ use std::cmp::Ordering;
 use mago_algebra::assertion_set::AssertionSet;
 use mago_algebra::assertion_set::negate_assertion_set;
 use mago_codex::assertion::Assertion;
+use mago_codex::ttype::TType;
 use mago_codex::ttype::add_optional_union_type;
 use mago_codex::ttype::atomic::TAtomic;
-use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::object::TObject;
-use mago_codex::ttype::atomic::resource::TResource;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::resource::TResource;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::atomic::scalar::string::TString;
@@ -1071,9 +1071,8 @@ fn push_loose_array_key_atomic(target: &mut Vec<TAtomic>, key_atomic: TAtomic) {
     match &key_atomic {
         TAtomic::Scalar(TScalar::Integer(integer)) => {
             if let TInteger::Literal(value) = integer {
-                target.push(TAtomic::Scalar(TScalar::String(TString::known_literal(word(
-                    value.to_string().as_bytes(),
-                )))));
+                target
+                    .push(TAtomic::Scalar(TScalar::String(TString::known_literal(word(value.to_string().as_bytes())))));
             } else {
                 target.push(TAtomic::Scalar(TScalar::string()));
             }
