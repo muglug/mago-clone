@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use foldhash::HashSet;
+use indexmap::IndexMap;
 
 use mago_algebra::find_satisfying_assignments;
 use mago_algebra::saturate_clauses;
@@ -83,6 +84,10 @@ where
         context.settings.formula_size_threshold,
     )
     .unwrap_or_default();
+
+    // Statement-level `A && B` needs the left formula again after `left_clauses`
+    // is consumed, to reconstruct the `!A` world during the final merge.
+    let saved_left_clauses = if block_context.if_body_context.is_none() { Some(left_clauses.clone()) } else { None };
 
     for (var_id, var_type) in &left_block_context.locals {
         if left_block_context.assigned_variable_ids.contains_key(var_id) {
@@ -220,16 +225,17 @@ where
 
     artifacts.set_expression_type(binary, result_type);
 
-    block_context.conditionally_referenced_variable_ids = left_block_context.conditionally_referenced_variable_ids;
+    block_context.conditionally_referenced_variable_ids =
+        left_block_context.conditionally_referenced_variable_ids.clone();
     block_context
         .conditionally_referenced_variable_ids
-        .extend(right_block_context.conditionally_referenced_variable_ids);
+        .extend(right_block_context.conditionally_referenced_variable_ids.clone());
 
     let left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
     let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
     if block_context.flags.inside_conditional() {
-        block_context.assigned_variable_ids = left_block_context.assigned_variable_ids;
-        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids);
+        block_context.assigned_variable_ids.clone_from(&left_assigned_var_ids);
+        block_context.assigned_variable_ids.extend(right_assigned_var_ids.clone());
     }
 
     // Propagate clause invalidations from both sides, plus restore pre-existing
@@ -260,6 +266,58 @@ where
             if_body_context_inner.reconciled_expression_clauses.extend(partitioned_clauses.1);
         }
     } else {
+        // Statement-level `A && B;`: a variable assigned inside B ends up with
+        // either its B-assigned type (A was truthy) or its left-context type
+        // narrowed by `!A` (B never ran). Merge both worlds for variables the
+        // RHS assigned; everything else keeps the left state.
+        let rhs_merged_vars: Vec<_> = right_assigned_var_ids
+            .keys()
+            .filter(|var_id| {
+                !left_assigned_var_ids.contains_key(*var_id) && left_block_context.locals.contains_key(*var_id)
+            })
+            .copied()
+            .collect();
+
+        let negated_left_locals = if rhs_merged_vars.is_empty() {
+            None
+        } else {
+            saved_left_clauses.map(|left_clauses_for_negation| {
+                let negated_clauses = negate_or_synthesize(
+                    left_clauses_for_negation,
+                    binary.lhs,
+                    context.get_assertion_context_from_block(block_context),
+                    artifacts,
+                    &context.settings.algebra_thresholds(),
+                    context.settings.formula_size_threshold,
+                );
+
+                let all_negated_clauses = saturate_clauses(
+                    block_context.clauses.iter().map(|v| &**v).chain(negated_clauses.iter()),
+                    &context.settings.algebra_thresholds(),
+                );
+
+                let (negated_assertions, _) =
+                    find_satisfying_assignments(all_negated_clauses.as_slice(), None, &mut WordSet::default());
+
+                let mut else_context = left_block_context.clone();
+                if !negated_assertions.is_empty() {
+                    reconciler::reconcile_keyed_types(
+                        context,
+                        &negated_assertions,
+                        IndexMap::new(),
+                        &mut else_context,
+                        &mut WordSet::default(),
+                        &WordSet::default(),
+                        &binary.lhs.span(),
+                        false,
+                        false,
+                    );
+                }
+
+                else_context.locals
+            })
+        };
+
         let left_locals = left_block_context.locals;
         for (var_id, var_type) in &right_block_context.locals {
             if right_assigned_var_ids.contains_key(var_id)
@@ -271,6 +329,26 @@ where
         }
 
         block_context.locals.extend(left_locals);
+
+        if let Some(negated_left_locals) = negated_left_locals {
+            for var_id in rhs_merged_vars {
+                let Some(right_type) = right_block_context.locals.get(&var_id) else {
+                    continue;
+                };
+
+                let merged_type = match negated_left_locals.get(&var_id) {
+                    Some(else_type) => combine_union_types_rc(
+                        right_type,
+                        else_type,
+                        context.codebase,
+                        context.settings.combiner_options(),
+                    ),
+                    None => Rc::clone(right_type),
+                };
+
+                block_context.locals.insert(var_id, merged_type);
+            }
+        }
     }
 
     Ok(())
@@ -343,6 +421,7 @@ where
             conditional::analyze(context, block_context.clone(), artifacts, &mut if_scope, binary.lhs, false)?;
         *block_context = applied_block_context;
 
+        left_assigned_var_ids = if_conditional_scope.assigned_in_conditional_variable_ids.clone();
         left_block_context = if_conditional_scope.if_body_context;
         left_referenced_var_ids = if_conditional_scope.conditionally_referenced_variable_ids;
     }
@@ -366,6 +445,10 @@ where
         context.settings.formula_size_threshold,
     )
     .unwrap_or_default();
+
+    // Statement-level `A || B` needs the positive left formula again during the
+    // final merge, to reconstruct the `A`-was-truthy world.
+    let saved_left_clauses = if block_context.if_body_context.is_none() { Some(left_clauses.clone()) } else { None };
 
     let mut negated_left_clauses = negate_or_synthesize(
         left_clauses,
@@ -520,7 +603,7 @@ where
 
         let mut clauses_for_right_analysis = BlockContext::remove_reconciled_clauses(
             &clauses_for_right_analysis,
-            &right_assigned_var_ids.into_keys().collect::<WordSet>(),
+            &right_assigned_var_ids.keys().copied().collect::<WordSet>(),
         )
         .0;
 
@@ -535,7 +618,7 @@ where
             &mut right_referenced_var_ids,
         );
 
-        if !right_type_assertions.is_empty() {
+        if !right_type_assertions.is_empty() && !operand_contains_assignment(binary.rhs) {
             let mut right_changed_var_ids = WordSet::default();
 
             reconciler::reconcile_keyed_types(
@@ -553,8 +636,84 @@ where
 
         block_context
             .conditionally_referenced_variable_ids
-            .extend(right_block_context.conditionally_referenced_variable_ids);
-        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids);
+            .extend(right_block_context.conditionally_referenced_variable_ids.clone());
+        block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids.clone());
+
+        // Statement-level `A || B;`: a variable assigned inside B holds either
+        // its B-assigned type (A was falsy) or its left-context type narrowed
+        // by `A` being truthy (B never ran). Merge both worlds for variables
+        // the RHS assigned.
+        if block_context.if_body_context.is_none() {
+            let rhs_merged_vars: Vec<_> = right_block_context
+                .locals
+                .keys()
+                .filter(|var_id| {
+                    right_assigned_var_ids.contains_key(*var_id) && !left_assigned_var_ids.contains_key(*var_id)
+                })
+                .copied()
+                .collect();
+
+            let truthy_left_locals = if rhs_merged_vars.is_empty() {
+                None
+            } else {
+                saved_left_clauses.map(|left_clauses_for_narrowing| {
+                    let all_left_clauses = saturate_clauses(
+                        block_context.clauses.iter().map(|v| &**v).chain(left_clauses_for_narrowing.iter()),
+                        &context.settings.algebra_thresholds(),
+                    );
+
+                    let (truthy_assertions, _) =
+                        find_satisfying_assignments(all_left_clauses.as_slice(), None, &mut WordSet::default());
+
+                    let mut truthy_context = left_block_context.clone();
+                    if !truthy_assertions.is_empty() {
+                        reconciler::reconcile_keyed_types(
+                            context,
+                            &truthy_assertions,
+                            IndexMap::new(),
+                            &mut truthy_context,
+                            &mut WordSet::default(),
+                            &WordSet::default(),
+                            &binary.lhs.span(),
+                            false,
+                            false,
+                        );
+                    }
+
+                    truthy_context.locals
+                })
+            };
+
+            for var_id in rhs_merged_vars {
+                let Some(right_type) = right_block_context.locals.get(&var_id) else {
+                    continue;
+                };
+
+                let left_type = truthy_left_locals
+                    .as_ref()
+                    .and_then(|locals| locals.get(&var_id))
+                    .or_else(|| left_block_context.locals.get(&var_id));
+
+                match left_type {
+                    Some(left_type) => {
+                        block_context.locals.insert(
+                            var_id,
+                            combine_union_types_rc(
+                                right_type,
+                                left_type,
+                                context.codebase,
+                                context.settings.combiner_options(),
+                            ),
+                        );
+                    }
+                    None => {
+                        // Unknown before the statement: it is only defined when
+                        // the RHS actually ran.
+                        block_context.variables_possibly_in_scope.insert(var_id);
+                    }
+                }
+            }
+        }
     }
 
     if let Some(if_body_context) = &block_context.if_body_context {
@@ -751,6 +910,17 @@ fn report_redundant_logical_operation<'arena, A>(
         return;
     }
 
+    // An operand judged constant-truthy/falsy that performs an assignment is
+    // there for its side effect: `$cond && $x = 1;` and `$cond || $x = 1;` are
+    // idiomatic conditional assignments, not redundant logic.
+    let lhs_is_judged_constant = lhs_description.contains("always");
+    let rhs_is_judged_constant = rhs_description.contains("always");
+    if (lhs_is_judged_constant && operand_contains_assignment(binary.lhs))
+        || (rhs_is_judged_constant && operand_contains_assignment(binary.rhs))
+    {
+        return;
+    }
+
     let issue = Issue::help(format!(
         "Redundant `{}` operation: left operand is {} and right operand is {}.",
         BytesDisplay(binary.operator.as_bytes()),
@@ -785,6 +955,16 @@ fn report_redundant_logical_operation<'arena, A>(
         });
     } else {
         context.collector.report_with_code(IssueCode::RedundantLogicalOperation, issue);
+    }
+}
+
+/// Whether the operand is an assignment expression (possibly parenthesized),
+/// e.g. the `($x = 1)` in `$cond && ($x = 1);`.
+fn operand_contains_assignment(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Parenthesized(parenthesized) => operand_contains_assignment(parenthesized.expression),
+        Expression::Assignment(_) => true,
+        _ => false,
     }
 }
 
