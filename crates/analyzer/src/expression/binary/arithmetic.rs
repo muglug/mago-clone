@@ -268,49 +268,55 @@ where
             let mut invalid_pair = false;
 
             if left_atomic.is_mixed() {
-                context.collector.report_with_code(
-                    IssueCode::MixedOperand,
-                    Issue::error(
-                        "Left operand in binary operation has type `mixed`."
-                    )
-                    .with_annotation(
-                        Annotation::primary(binary.lhs.span())
-                            .with_message("Operand is `mixed`.")
-                    )
-                    .with_note(
-                        "Performing operations on `mixed` is unsafe as the actual runtime type is unknown."
-                    )
-                    .with_help(
-                        "Ensure the left operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks."
-                    ),
-                );
+                if !left_atomic.is_mixed_isset_from_loop() {
+                    context.collector.report_with_code(
+                        IssueCode::MixedOperand,
+                        Issue::error("Left operand in binary operation has type `mixed`.")
+                            .with_annotation(
+                                Annotation::primary(binary.lhs.span()).with_message("Operand is `mixed`."),
+                            )
+                            .with_note(
+                                "Performing operations on `mixed` is unsafe as the actual runtime type is unknown.",
+                            )
+                            .with_help(
+                                "Ensure the left operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
+                            ),
+                    );
+                }
 
-                pair_result_atomics.push(TAtomic::Mixed(TMixed::new()));
+                pair_result_atomics.push(if left_atomic.is_mixed_isset_from_loop() {
+                    left_atomic.clone()
+                } else {
+                    TAtomic::Mixed(TMixed::new())
+                });
                 if !right_atomic.is_mixed() {
                     has_valid_right_operand = true;
                 }
             }
 
             if right_atomic.is_mixed() {
-                context.collector.report_with_code(
-                    IssueCode::MixedOperand,
-                    Issue::error(
-                        "Right operand in binary operation has type `mixed`."
-                    )
-                    .with_annotation(
-                        Annotation::primary(binary.rhs.span())
-                            .with_message("Operand is `mixed`.")
-                    )
-                    .with_note(
-                        "Performing operations on `mixed` is unsafe as the actual runtime type is unknown."
-                    )
-                    .with_help(
-                        "Ensure the right operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks."
-                    ),
-                );
+                if !right_atomic.is_mixed_isset_from_loop() {
+                    context.collector.report_with_code(
+                        IssueCode::MixedOperand,
+                        Issue::error("Right operand in binary operation has type `mixed`.")
+                            .with_annotation(
+                                Annotation::primary(binary.rhs.span()).with_message("Operand is `mixed`."),
+                            )
+                            .with_note(
+                                "Performing operations on `mixed` is unsafe as the actual runtime type is unknown.",
+                            )
+                            .with_help(
+                                "Ensure the right operand has a known type (e.g., `int`, `float`, `string`) using type hints, assertions, or checks.",
+                            ),
+                    );
+                }
 
                 if !pair_result_atomics.iter().any(mago_codex::ttype::atomic::TAtomic::is_mixed) {
-                    pair_result_atomics.push(TAtomic::Mixed(TMixed::new()));
+                    pair_result_atomics.push(if right_atomic.is_mixed_isset_from_loop() {
+                        right_atomic.clone()
+                    } else {
+                        TAtomic::Mixed(TMixed::new())
+                    });
                 }
                 if !left_atomic.is_mixed() {
                     has_valid_left_operand = true;

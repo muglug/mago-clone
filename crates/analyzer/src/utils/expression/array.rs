@@ -1575,7 +1575,7 @@ where
         }
     }
 
-    if matches!(mixed, TAtomic::Never) {
+    if matches!(mixed, TAtomic::Never) || mixed.is_mixed_isset_from_loop() {
         return get_mixed_maybe_from_loop(true);
     }
 

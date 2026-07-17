@@ -56,3 +56,84 @@ function assignment_reaches_else(?ConditionalContainer $container): void
         $value->isValid();
     }
 }
+
+class ConditionalParent {}
+
+final class ConditionalChild extends ConditionalParent
+{
+    public function childMethod(): void {}
+}
+
+function get_class_narrows_object(ConditionalParent $object): void
+{
+    if (get_class($object) === ConditionalChild::class) {
+        $object->childMethod();
+    }
+}
+
+function negated_get_class_narrows_else(ConditionalParent $object): void
+{
+    if (get_class($object) !== ConditionalChild::class) {
+        return;
+    }
+
+    $object->childMethod();
+}
+
+final class ConditionalFalsyProperties
+{
+    public ?string $first = null;
+    public ?string $second = null;
+}
+
+function loose_false_comparison_negates_nested_assertion(ConditionalFalsyProperties $object): string
+{
+    if (($object->first === null) == false) {
+        return $object->first;
+    } elseif (is_null($object->second) == false) {
+        return $object->second;
+    }
+
+    return 'fallback';
+}
+
+function isset_array_creation_across_loop_iterations(): void
+{
+    $values = [];
+
+    foreach ([0, 1, 2, 3] as $_) {
+        $key = (int) (rand(0, 1) ? 5 : '010');
+
+        if (!isset($values[$key])) {
+            $values[$key] = 5;
+        } else {
+            $values[$key] += 4;
+        }
+    }
+}
+
+final class ConditionalRangeEndpoint
+{
+    public function accepts(self $endpoint): void {}
+
+    public function use(): void {}
+}
+
+function elseif_join_retains_cumulative_negations(
+    ?ConditionalRangeEndpoint $from,
+    ?ConditionalRangeEndpoint $to,
+): void {
+    if (!$to && !$from) {
+        $to = new ConditionalRangeEndpoint();
+        $from = new ConditionalRangeEndpoint();
+    } elseif (!$from) {
+        $from = new ConditionalRangeEndpoint();
+        $from->accepts($to);
+    } elseif (!$to) {
+        $to = new ConditionalRangeEndpoint();
+        $to->accepts($from);
+    }
+
+    $from->use();
+    $to->use();
+}

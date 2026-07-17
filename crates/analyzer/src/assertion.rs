@@ -666,7 +666,7 @@ where
     }
 
     if let Some(false_position) = has_false_variable(left, right, artifacts) {
-        return get_false_equality_assertions(left, is_identity, right, assertion_context, false_position);
+        return get_false_equality_assertions(left, is_identity, right, artifacts, assertion_context, false_position);
     }
 
     if let Some(empty_array_position) = has_empty_array_variable(left, right) {
@@ -797,32 +797,41 @@ where
 {
     let left_class_part = is_class_constant_access(left);
     let right_class_part = is_class_constant_access(right);
+    let left_get_class_argument = get_get_class_argument(left, assertion_context);
+    let right_get_class_argument = get_get_class_argument(right, assertion_context);
 
-    let (variable_expr, class_name_expr) = match (left_class_part, right_class_part) {
-        // Case 1: Both sides are `::class` expressions (e.g., `$var::class === Foo::class`)
-        (Some(left_part), Some(right_part)) => {
-            let left_is_static = is_static_class_reference(left_part);
-            let right_is_static = is_static_class_reference(right_part);
+    let (variable_expr, class_name_expr) =
+        if let (Some(variable), Some(_)) = (left_get_class_argument, right_class_part) {
+            (variable, right)
+        } else if let (Some(variable), Some(_)) = (right_get_class_argument, left_class_part) {
+            (variable, left)
+        } else {
+            match (left_class_part, right_class_part) {
+                // Case 1: Both sides are `::class` expressions (e.g., `$var::class === Foo::class`)
+                (Some(left_part), Some(right_part)) => {
+                    let left_is_static = is_static_class_reference(left_part);
+                    let right_is_static = is_static_class_reference(right_part);
 
-            if !left_is_static && right_is_static {
-                // $var::class === Foo::class  =>  $var is the variable, Foo::class is the type
-                (left_part, right)
-            } else if left_is_static && !right_is_static {
-                // Foo::class === $var::class  =>  $var is the variable, Foo::class is the type
-                (right_part, left)
-            } else {
-                // Both are dynamic ($a::class === $b::class) or both static (A::class === B::class).
-                // Let the standard reconciler handle these comparisons.
-                return None;
+                    if !left_is_static && right_is_static {
+                        // $var::class === Foo::class  =>  $var is the variable, Foo::class is the type
+                        (left_part, right)
+                    } else if left_is_static && !right_is_static {
+                        // Foo::class === $var::class  =>  $var is the variable, Foo::class is the type
+                        (right_part, left)
+                    } else {
+                        // Both are dynamic ($a::class === $b::class) or both static (A::class === B::class).
+                        // Let the standard reconciler handle these comparisons.
+                        return None;
+                    }
+                }
+                // Case 2: Only the left side is `::class`
+                (Some(part), None) => (part, right),
+                // Case 3: Only the right side is `::class`
+                (None, Some(part)) => (part, left),
+                // Case 4: Neither side is `::class`
+                (None, None) => return None,
             }
-        }
-        // Case 2: Only the left side is `::class`
-        (Some(part), None) => (part, right),
-        // Case 3: Only the right side is `::class`
-        (None, Some(part)) => (part, left),
-        // Case 4: Neither side is `::class`
-        (None, None) => return None,
-    };
+        };
 
     let variable_id = get_expression_id(
         variable_expr,
@@ -859,6 +868,28 @@ where
     let mut if_types = WordMap::default();
     if_types.insert(variable_id, vec![assertions]);
     Some(vec![if_types])
+}
+
+/// Returns the subject of a one-argument `get_class()` call. Comparing the
+/// call result with `Foo::class` describes the subject object, not the string
+/// returned by the call.
+fn get_get_class_argument<'arena, A>(
+    expression: &'arena Expression<'arena>,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<&'arena Expression<'arena>>
+where
+    A: Arena,
+{
+    let expression = unwrap_expression(expression);
+    if !is_function_call_to(expression, assertion_context, b"get_class") {
+        return None;
+    }
+
+    let Expression::Call(Call::Function(function_call)) = expression else {
+        return None;
+    };
+
+    function_call.argument_list.arguments.first().map(mago_syntax::cst::Argument::value)
 }
 
 /// Helper to check if an expression is a `::class` constant access.
@@ -1867,6 +1898,7 @@ fn get_false_equality_assertions<A>(
     left: &Expression,
     is_identity: bool,
     right: &Expression,
+    artifacts: &AnalysisArtifacts,
     assertion_context: AssertionContext<'_, '_, A>,
     false_position: OtherValuePosition,
 ) -> Vec<WordMap<AssertionSet>>
@@ -1896,7 +1928,15 @@ where
         return vec![if_types];
     }
 
-    vec![]
+    let assertions = scrape_assertions(base_conditional, artifacts, assertion_context);
+    let mut negated_assertions = WordMap::default();
+    for assertion in assertions {
+        for (var_name, assertion_set) in assertion {
+            negated_assertions.entry(var_name).or_insert_with(Vec::new).extend(negate_assertion_set(assertion_set));
+        }
+    }
+
+    if negated_assertions.is_empty() { vec![] } else { vec![negated_assertions] }
 }
 
 fn get_typed_value_equality_assertions<A>(

@@ -65,8 +65,15 @@ where
     let lhs_type = artifacts.get_rc_expression_type(&binary.lhs).unwrap_or(&fallback_type);
     let rhs_type = artifacts.get_rc_expression_type(&binary.rhs).unwrap_or(&fallback_type);
 
-    check_comparison_operand(context, binary.lhs, lhs_type, "Left", &binary.operator);
-    check_comparison_operand(context, binary.rhs, rhs_type, "Right", &binary.operator);
+    // Loose comparison with a boolean literal is well-defined when the other
+    // side is already exactly `bool`; there is no cross-type coercion to warn
+    // about. Keep reporting for nullable or otherwise falsable unions.
+    if !(lhs_type.is_false() && rhs_type.is_bool()) {
+        check_comparison_operand(context, binary.lhs, lhs_type, "Left", &binary.operator);
+    }
+    if !(rhs_type.is_false() && lhs_type.is_bool()) {
+        check_comparison_operand(context, binary.rhs, rhs_type, "Right", &binary.operator);
+    }
 
     if context.settings.no_boolean_literal_comparison
         // Only consider equality/inequality operators.

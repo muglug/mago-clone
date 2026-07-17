@@ -1069,8 +1069,6 @@ where
         &mut WordSet::default(),
     );
 
-    let mut original_context = else_block_context.clone();
-
     if !else_types.is_empty() {
         let mut changed_variable_ids = WordSet::default();
 
@@ -1194,7 +1192,7 @@ where
             context,
             if_scope,
             else_block_context,
-            &mut original_context,
+            outer_block_context,
             new_assigned_variable_ids,
             new_possibly_assigned_variable_ids.clone(),
             &if_scope.conditionally_changed_variable_ids.clone(),

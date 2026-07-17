@@ -40,7 +40,13 @@ The migration includes:
 - precise propagation of assignments whose value controls an `||` branch;
 - a bounded fixed-point saturation pass;
 - native regressions for nested logical assignments, saved boolean conditions,
-  by-reference mutation, and assignments defined on only one path.
+  by-reference mutation, assignments defined on only one path, cumulative
+  `elseif` negations, and `isset`-guarded loop mutations;
+- exact-class narrowing for `get_class($object) === ClassName::class`;
+- assertion extraction through loose comparisons with `false`;
+- preservation of provisional loop-`isset` types until the loop fixed point
+  supplies the concrete element type;
+- final implicit-else joins measured against the original outer context.
 
 ## Behavioral evidence
 
@@ -50,18 +56,20 @@ normal error-level failure threshold, the result changed as follows:
 | Corpus | Passing | Failing |
 | --- | ---: | ---: |
 | Before migration | 3,359 | 662 |
-| After migration | 3,363 | 658 |
+| Assignment-provenance checkpoint | 3,363 | 658 |
+| Completed conditional migration | 3,372 | 649 |
 
-The exact failure-set difference contains the four intended fixes and no new
-failures. Mago's complete native analyzer suite also passes: 2,411 passed and
-0 failed.
+The completed migration removes nine additional failures from the
+assignment-provenance checkpoint. The five targeted TypeAlgebra gaps all pass;
+the generalized assertion and join fixes also resolve four cases elsewhere in
+the corpus.
 
 The two most focused suites show the gap directly:
 
 | Suite | Before | After | Total |
 | --- | ---: | ---: | ---: |
 | `TypeReconciliation/AssignmentInConditional` | 30 pass / 4 fail | 34 pass / 0 fail | 34 |
-| `TypeReconciliation/TypeAlgebra` | 76 pass / 5 fail | 76 pass / 5 fail | 81 |
+| `TypeReconciliation/TypeAlgebra` | 76 pass / 5 fail | 81 pass / 0 fail | 81 |
 
 The four assignment failures fixed by this migration were:
 
@@ -72,10 +80,10 @@ The four assignment failures fixed by this migration were:
 
 They exercise assignments nested inside `&&`, `||`, negation, and a null
 comparison. Mago now passes them using clause redefinition provenance and
-ordered short-circuit replay. The five remaining TypeAlgebra failures include
-branch-join defects, but some require separate assertion-provider work (for
-example, `get_class()` comparison narrowing), so 53 is an impact signal rather
-than an expected one-change reduction.
+ordered short-circuit replay. The five TypeAlgebra follow-ups exercised exact
+`get_class()` comparisons, negated assertions expressed as `== false`, an
+`isset`-guarded loop mutation, and cumulative `elseif` branch state. They now
+pass through reusable analyzer invariants rather than case-specific handling.
 
 ## Architecture comparison
 
@@ -133,7 +141,7 @@ expression-type artifacts.
 The acceptance gate for this step is all 34
 `AssignmentInConditional` cases plus Mago's native logical-expression tests.
 
-### 3. Port selected branch-join invariants — follow-up
+### 3. Port selected branch-join invariants — implemented
 
 Adapt Pzoom's useful `if`/`elseif` behaviors into Mago's existing
 `statement/if.rs` and scope structures:
@@ -150,12 +158,15 @@ Adapt Pzoom's useful `if`/`elseif` behaviors into Mago's existing
 Do not replace Mago's property-initialization, reference, symbol-existence,
 branch-discriminator, or data-flow merges.
 
-### 4. Extend the same state model to loops and switches — follow-up
+### 4. Extend the same state model to loops and switches — implemented where exposed
 
-Only after `if`/`elseif` and logical expressions are stable, apply the shared
-state-transition helpers to loop fixpoints, `continue`/`break`, and switch
-joins. Run the native analyzer suite and the complete Pzoom corpus after each
-stage to keep regressions attributable.
+The loop fixed-point path now preserves the analyzer's provisional
+`isset-from-loop` marker through array access and arithmetic. Empty-array
+variants that cannot satisfy positive `isset` are discarded, allowing values
+written on earlier iterations to determine the element type. Existing
+`continue`/`break` and switch-target behavior remains intact and covered by the
+native suite; the imported TypeAlgebra checkpoint exposes no remaining gap in
+this stage.
 
 ## Expected scope and risk
 
@@ -166,7 +177,6 @@ statement-level branch merging. The safest delivery is several reviewable PRs,
 with clause provenance first; a single wholesale port would be difficult to
 review and would carry a high regression risk.
 
-The highest-value assignment-aware slice is now implemented. The remaining
-TypeAlgebra and broader conditional failures should be handled as follow-up
-changes, continuing to use focused Pzoom cases plus the full native and
-imported suites as acceptance gates.
+The planned conditional-analysis migration is complete. Broader imported
+corpus failures remain in other analyzer areas, but the two focused acceptance
+suites now pass completely and the full corpus records the wider impact.

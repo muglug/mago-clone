@@ -1148,6 +1148,13 @@ where
                         }
                     } else if matches!(existing_key_type_part, TAtomic::Scalar(TScalar::String(_))) {
                         new_base_type_candidate = get_string();
+                    } else if existing_key_type_part.is_never() && has_isset {
+                        // An empty-array variant cannot satisfy a positive `isset($array[$key])`
+                        // assertion. Other variants in the union may still provide the element
+                        // type (notably for arrays populated by an earlier loop iteration), so
+                        // discard this impossible variant instead of letting it widen the access
+                        // to mixed.
+                        continue;
                     } else if existing_key_type_part.is_never() || existing_key_type_part.is_mixed_isset_from_loop() {
                         return Some(get_mixed_maybe_from_loop(inside_loop));
                     } else if let TAtomic::Object(TObject::Named(_named_object)) = &existing_key_type_part {
