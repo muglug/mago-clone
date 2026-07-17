@@ -2060,7 +2060,7 @@ where
 }
 
 fn reconcile_in_array<A>(
-    context: &mut Context<'_, '_, A>,
+    context: &Context<'_, '_, A>,
     _assertion: &Assertion,
     existing_var_type: &TUnion,
     _key: Option<&[u8]>,

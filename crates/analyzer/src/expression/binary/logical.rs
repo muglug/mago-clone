@@ -2,7 +2,6 @@ use mago_allocator::Arena;
 use std::rc::Rc;
 
 use foldhash::HashSet;
-use indexmap::IndexMap;
 
 use mago_algebra::find_satisfying_assignments;
 use mago_algebra::saturate_clauses;
@@ -84,10 +83,6 @@ where
         context.settings.formula_size_threshold,
     )
     .unwrap_or_default();
-
-    // Statement-level `A && B` needs the left formula again after `left_clauses`
-    // is consumed, to reconstruct the `!A` world during the final merge.
-    let saved_left_clauses = if block_context.if_body_context.is_none() { Some(left_clauses.clone()) } else { None };
 
     for (var_id, var_type) in &left_block_context.locals {
         if left_block_context.assigned_variable_ids.contains_key(var_id) {
@@ -233,10 +228,11 @@ where
 
     let left_assigned_var_ids = left_block_context.assigned_variable_ids.clone();
     let right_assigned_var_ids = right_block_context.assigned_variable_ids.clone();
-    if block_context.flags.inside_conditional() {
-        block_context.assigned_variable_ids.clone_from(&left_assigned_var_ids);
-        block_context.assigned_variable_ids.extend(right_assigned_var_ids.clone());
-    }
+    // Both operands' assignments are visible to enclosing expressions (a
+    // nested `A && B` inside a larger condition must surface them so the
+    // parent's merge copies the post-assignment types).
+    block_context.assigned_variable_ids.extend(left_assigned_var_ids);
+    block_context.assigned_variable_ids.extend(right_assigned_var_ids.clone());
 
     // Propagate clause invalidations from both sides, plus restore pre-existing
     // ones, so parent expressions know which variables had their narrowing voided.
@@ -266,87 +262,15 @@ where
             if_body_context_inner.reconciled_expression_clauses.extend(partitioned_clauses.1);
         }
     } else {
-        // Statement-level `A && B;`: a variable assigned inside B ends up with
-        // either its B-assigned type (A was truthy) or its left-context type
-        // narrowed by `!A` (B never ran). Merge both worlds for variables the
-        // RHS assigned; everything else keeps the left state.
-        let rhs_merged_vars: Vec<_> = right_assigned_var_ids
-            .keys()
-            .filter(|var_id| {
-                !left_assigned_var_ids.contains_key(*var_id) && left_block_context.locals.contains_key(*var_id)
-            })
-            .copied()
-            .collect();
-
-        let negated_left_locals = if rhs_merged_vars.is_empty() {
-            None
-        } else {
-            saved_left_clauses.map(|left_clauses_for_negation| {
-                let negated_clauses = negate_or_synthesize(
-                    left_clauses_for_negation,
-                    binary.lhs,
-                    context.get_assertion_context_from_block(block_context),
-                    artifacts,
-                    &context.settings.algebra_thresholds(),
-                    context.settings.formula_size_threshold,
-                );
-
-                let all_negated_clauses = saturate_clauses(
-                    block_context.clauses.iter().map(|v| &**v).chain(negated_clauses.iter()),
-                    &context.settings.algebra_thresholds(),
-                );
-
-                let (negated_assertions, _) =
-                    find_satisfying_assignments(all_negated_clauses.as_slice(), None, &mut WordSet::default());
-
-                let mut else_context = left_block_context.clone();
-                if !negated_assertions.is_empty() {
-                    reconciler::reconcile_keyed_types(
-                        context,
-                        &negated_assertions,
-                        IndexMap::new(),
-                        &mut else_context,
-                        &mut WordSet::default(),
-                        &WordSet::default(),
-                        &binary.lhs.span(),
-                        false,
-                        false,
-                    );
-                }
-
-                else_context.locals
-            })
-        };
-
-        let left_locals = left_block_context.locals;
+        // Statement-level `A && B`: variables assigned inside either operand
+        // take their post-assignment types (Psalm's AndAnalyzer copies
+        // assigned vars from the operand contexts; the untaken-branch world is
+        // deliberately ignored, matching Psalm's practical semantics for
+        // conditional assignments consumed later in the same expression).
+        block_context.locals.extend(left_block_context.locals);
         for (var_id, var_type) in &right_block_context.locals {
-            if right_assigned_var_ids.contains_key(var_id)
-                && !left_assigned_var_ids.contains_key(var_id)
-                && !left_locals.contains_key(var_id)
-            {
+            if right_assigned_var_ids.contains_key(var_id) {
                 block_context.locals.insert(*var_id, Rc::clone(var_type));
-            }
-        }
-
-        block_context.locals.extend(left_locals);
-
-        if let Some(negated_left_locals) = negated_left_locals {
-            for var_id in rhs_merged_vars {
-                let Some(right_type) = right_block_context.locals.get(&var_id) else {
-                    continue;
-                };
-
-                let merged_type = match negated_left_locals.get(&var_id) {
-                    Some(else_type) => combine_union_types_rc(
-                        right_type,
-                        else_type,
-                        context.codebase,
-                        context.settings.combiner_options(),
-                    ),
-                    None => Rc::clone(right_type),
-                };
-
-                block_context.locals.insert(var_id, merged_type);
             }
         }
     }
@@ -445,10 +369,6 @@ where
         context.settings.formula_size_threshold,
     )
     .unwrap_or_default();
-
-    // Statement-level `A || B` needs the positive left formula again during the
-    // final merge, to reconstruct the `A`-was-truthy world.
-    let saved_left_clauses = if block_context.if_body_context.is_none() { Some(left_clauses.clone()) } else { None };
 
     let mut negated_left_clauses = negate_or_synthesize(
         left_clauses,
@@ -639,78 +559,24 @@ where
             .extend(right_block_context.conditionally_referenced_variable_ids.clone());
         block_context.assigned_variable_ids.extend(right_block_context.assigned_variable_ids.clone());
 
-        // Statement-level `A || B;`: a variable assigned inside B holds either
-        // its B-assigned type (A was falsy) or its left-context type narrowed
-        // by `A` being truthy (B never ran). Merge both worlds for variables
-        // the RHS assigned.
+        // Statement-level `A || B`: variables assigned inside the right
+        // operand take their post-assignment types (Psalm's OrAnalyzer copies
+        // assigned vars from the operand contexts; the short-circuit world is
+        // deliberately ignored, matching Psalm's practical semantics for
+        // conditional fallback assignments).
         if block_context.if_body_context.is_none() {
-            let rhs_merged_vars: Vec<_> = right_block_context
-                .locals
-                .keys()
-                .filter(|var_id| {
-                    right_assigned_var_ids.contains_key(*var_id) && !left_assigned_var_ids.contains_key(*var_id)
-                })
-                .copied()
-                .collect();
-
-            let truthy_left_locals = if rhs_merged_vars.is_empty() {
-                None
-            } else {
-                saved_left_clauses.map(|left_clauses_for_narrowing| {
-                    let all_left_clauses = saturate_clauses(
-                        block_context.clauses.iter().map(|v| &**v).chain(left_clauses_for_narrowing.iter()),
-                        &context.settings.algebra_thresholds(),
-                    );
-
-                    let (truthy_assertions, _) =
-                        find_satisfying_assignments(all_left_clauses.as_slice(), None, &mut WordSet::default());
-
-                    let mut truthy_context = left_block_context.clone();
-                    if !truthy_assertions.is_empty() {
-                        reconciler::reconcile_keyed_types(
-                            context,
-                            &truthy_assertions,
-                            IndexMap::new(),
-                            &mut truthy_context,
-                            &mut WordSet::default(),
-                            &WordSet::default(),
-                            &binary.lhs.span(),
-                            false,
-                            false,
-                        );
-                    }
-
-                    truthy_context.locals
-                })
-            };
-
-            for var_id in rhs_merged_vars {
-                let Some(right_type) = right_block_context.locals.get(&var_id) else {
+            for (var_id, right_type) in &right_block_context.locals {
+                if !right_assigned_var_ids.contains_key(var_id) {
                     continue;
-                };
+                }
 
-                let left_type = truthy_left_locals
-                    .as_ref()
-                    .and_then(|locals| locals.get(&var_id))
-                    .or_else(|| left_block_context.locals.get(&var_id));
-
-                match left_type {
-                    Some(left_type) => {
-                        block_context.locals.insert(
-                            var_id,
-                            combine_union_types_rc(
-                                right_type,
-                                left_type,
-                                context.codebase,
-                                context.settings.combiner_options(),
-                            ),
-                        );
-                    }
-                    None => {
-                        // Unknown before the statement: it is only defined when
-                        // the RHS actually ran.
-                        block_context.variables_possibly_in_scope.insert(var_id);
-                    }
+                if block_context.locals.contains_key(var_id) || left_block_context.locals.contains_key(var_id) {
+                    block_context.locals.insert(*var_id, Rc::clone(right_type));
+                } else {
+                    // Unknown before the statement: it is only defined when the
+                    // RHS actually ran, so it is merely possibly in scope.
+                    block_context.variables_possibly_in_scope.insert(*var_id);
+                    block_context.possibly_assigned_variable_ids.insert(*var_id);
                 }
             }
         }

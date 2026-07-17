@@ -504,6 +504,23 @@ pub fn find_satisfying_assignments(
         }
 
         let assertions = possible_types.values().cloned().collect::<Vec<_>>();
+
+        // A clause whose conditional reassigned the variable supersedes
+        // earlier (pre-assignment) truths instead of conjoining with them
+        // (Psalm's redefined_vars check in getTruthsFromFormula).
+        if clause.redefined_vars.contains(variable_id) {
+            truths.insert(*variable_id, vec![assertions]);
+            active_truths.shift_remove(variable_id);
+
+            if let Some(creating_conditional_id) = creating_conditional_id
+                && creating_conditional_id == clause.condition_span
+            {
+                active_truths.entry(*variable_id).or_default().insert(0);
+            }
+
+            continue;
+        }
+
         let truth_entry = truths.entry(*variable_id).or_default();
         let new_truth_index = truth_entry.len();
         truth_entry.push(assertions);
@@ -595,6 +612,14 @@ pub fn disjoin_clauses(
             }
 
             let mut possibilities = left_clause.possibilities.clone();
+
+            // The right clause's conditional reassigned these variables, so
+            // the left clause's pre-assignment facts no longer describe them
+            // (Psalm skips redefined vars when merging ored clauses).
+            if !right_clause.redefined_vars.is_empty() {
+                possibilities.retain(|var, _| !right_clause.redefined_vars.contains(var));
+            }
+
             for (var, possible_types) in &right_clause.possibilities {
                 match possibilities.get_mut(var) {
                     Some(existing) => {

@@ -354,6 +354,7 @@ where
         expression,
         scrape_assertions(expression, artifacts, assertion_context),
         formula_size_threshold,
+        assertion_context,
     )?;
 
     add_nullsafe_base_clauses(expression, &mut formula, conditional_object_id, creating_object_id, assertion_context);
@@ -509,7 +510,14 @@ where
             )?
         } else {
             let assertions = scrape_equality_assertions(subject, is_identity, condition, artifacts, assertion_context);
-            get_formula_from_assertions(condition_span, subject_span, subject, assertions, formula_size_threshold)?
+            get_formula_from_assertions(
+                condition_span,
+                subject_span,
+                subject,
+                assertions,
+                formula_size_threshold,
+                assertion_context,
+            )?
         };
 
         clauses = disjoin_clauses(clauses, formula, condition_span, algebra_thresholds);
@@ -521,13 +529,23 @@ where
     Some(clauses)
 }
 
-fn get_formula_from_assertions(
+fn get_formula_from_assertions<A>(
     conditional_object_id: Span,
     creating_object_id: Span,
     conditional: &Expression,
     anded_assertions: Vec<WordMap<AssertionSet>>,
     formula_size_threshold: u16,
-) -> Option<Vec<Clause>> {
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<Vec<Clause>>
+where
+    A: Arena,
+{
+    // Assignments inside the conditional (e.g. `($v = expr) === null`) make
+    // the clause's facts describe the variable's *post-assignment* value —
+    // Psalm records this as the clause's redefined vars.
+    let mut assigned_variable_ids: Vec<Word> = Vec::new();
+    collect_assigned_variable_ids(conditional, assertion_context, &mut assigned_variable_ids);
+
     let mut clauses = Vec::new();
     for assertions in anded_assertions {
         for (var_id, anded_types) in assertions {
@@ -537,7 +555,7 @@ fn get_formula_from_assertions(
                 };
 
                 let has_equality = first_type.has_equality();
-                clauses.push(Clause::new(
+                let mut clause = Clause::new(
                     {
                         let mut map = IndexMap::new();
                         map.insert(
@@ -551,7 +569,13 @@ fn get_formula_from_assertions(
                     Some(false),
                     Some(true),
                     Some(has_equality),
-                ));
+                );
+
+                if assigned_variable_ids.contains(&var_id) {
+                    clause.mark_redefined(var_id);
+                }
+
+                clauses.push(clause);
             }
         }
     }
@@ -671,6 +695,7 @@ where
         algebra_thresholds,
         formula_size_threshold,
     )?;
+
     clauses.extend(get_formula(
         conditional_object_id,
         right.span(),
@@ -682,6 +707,43 @@ where
     )?);
 
     if clauses.len() > usize::from(formula_size_threshold) { None } else { Some(clauses) }
+}
+
+/// Collects the expression ids of variables assigned anywhere inside a
+/// conditional expression (descending through parentheses, unary operators,
+/// binary operators, and assignment values).
+fn collect_assigned_variable_ids<A>(
+    expression: &Expression,
+    assertion_context: AssertionContext<'_, '_, A>,
+    assigned: &mut Vec<Word>,
+) where
+    A: Arena,
+{
+    match expression {
+        Expression::Parenthesized(parenthesized) => {
+            collect_assigned_variable_ids(parenthesized.expression, assertion_context, assigned);
+        }
+        Expression::Assignment(assignment) => {
+            if let Some(variable_id) = get_expression_id(
+                assignment.lhs,
+                assertion_context.this_class_name,
+                assertion_context.resolved_names,
+                Some(assertion_context.codebase),
+            ) {
+                assigned.push(variable_id);
+            }
+
+            collect_assigned_variable_ids(assignment.rhs, assertion_context, assigned);
+        }
+        Expression::Binary(binary) => {
+            collect_assigned_variable_ids(binary.lhs, assertion_context, assigned);
+            collect_assigned_variable_ids(binary.rhs, assertion_context, assigned);
+        }
+        Expression::UnaryPrefix(unary) => {
+            collect_assigned_variable_ids(unary.operand, assertion_context, assigned);
+        }
+        _ => {}
+    }
 }
 
 pub fn remove_clauses_with_mixed_variables(

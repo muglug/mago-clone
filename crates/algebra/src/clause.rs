@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::hash::BuildHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
@@ -24,6 +25,13 @@ pub struct Clause {
     pub wedge: bool,
     pub reconcilable: bool,
     pub generated: bool,
+    /// Variables this clause's conditional *reassigned* (Psalm's
+    /// `redefined_vars`, from assignments inside the conditional like
+    /// `($v = expr) === null`). Facts about a redefined variable describe its
+    /// post-assignment value: `disjoin_clauses` drops the other side's
+    /// pre-assignment possibilities and `find_satisfying_assignments`
+    /// replaces (rather than conjoins) earlier truths.
+    pub redefined_vars: BTreeSet<Word>,
 }
 
 impl PartialEq for Clause {
@@ -62,7 +70,15 @@ impl Clause {
             generated: generated.unwrap_or(false),
             hash: get_hash(&possibilities, span, wedge.unwrap_or(false), reconcilable.unwrap_or(true)),
             possibilities,
+            redefined_vars: BTreeSet::new(),
         }
+    }
+
+    /// Records that this clause's conditional reassigned `var_id`, so the
+    /// clause's facts describe the variable's post-assignment value.
+    #[inline]
+    pub fn mark_redefined(&mut self, var_id: Word) {
+        self.redefined_vars.insert(var_id);
     }
 
     #[inline]
@@ -76,14 +92,17 @@ impl Clause {
             return None;
         }
 
-        Some(Clause::new(
+        let mut clause = Clause::new(
             possibilities,
             self.condition_span,
             self.span,
             Some(self.wedge),
             Some(self.reconcilable),
             Some(self.generated),
-        ))
+        );
+        clause.redefined_vars.clone_from(&self.redefined_vars);
+
+        Some(clause)
     }
 
     #[inline]
@@ -93,14 +112,17 @@ impl Clause {
 
         possibilities.insert(var_id, new_possibility);
 
-        Clause::new(
+        let mut clause = Clause::new(
             possibilities,
             self.condition_span,
             self.span,
             Some(self.wedge),
             Some(self.reconcilable),
             Some(self.generated),
-        )
+        );
+        clause.redefined_vars.clone_from(&self.redefined_vars);
+
+        clause
     }
 
     #[inline]
