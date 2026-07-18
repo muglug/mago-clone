@@ -66,6 +66,7 @@ pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     argument_offset: usize,
     analyzed_argument_types: &mut HashMap<usize, (TUnion, Span)>,
     referenced_parameter: bool,
+    allows_undefined_reference: bool,
     closure_parameter_type: Option<&TUnion>,
 ) -> Result<(), AnalysisError>
 where
@@ -111,16 +112,19 @@ where
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_call = block_context.flags.inside_call();
     let was_inside_variable_reference = block_context.flags.inside_variable_reference();
+    let was_inside_out_parameter_reference = block_context.flags.inside_out_parameter_reference();
 
     block_context.flags.set_inside_general_use(true);
     block_context.flags.set_inside_call(true);
     block_context.flags.set_inside_variable_reference(referenced_parameter);
+    block_context.flags.set_inside_out_parameter_reference(referenced_parameter && allows_undefined_reference);
 
     argument_expression.analyze(context, block_context, artifacts)?;
 
     block_context.flags.set_inside_general_use(was_inside_general_use);
     block_context.flags.set_inside_call(was_inside_call);
     block_context.flags.set_inside_variable_reference(was_inside_variable_reference);
+    block_context.flags.set_inside_out_parameter_reference(was_inside_out_parameter_reference);
     artifacts.inferred_parameter_types = inferred_parameter_types;
 
     let argument_type = artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);

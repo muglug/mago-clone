@@ -218,11 +218,7 @@ fn get_definitely_evaluated_expression_after_if<'ast, 'arena>(
             return get_definitely_evaluated_expression_after_if(p.expression);
         }
         Expression::Binary(binary) => {
-            if let BinaryOperator::Or(_)
-            | BinaryOperator::LowOr(_)
-            | BinaryOperator::And(_)
-            | BinaryOperator::LowAnd(_) = binary.operator
-            {
+            if let BinaryOperator::And(_) | BinaryOperator::LowAnd(_) | BinaryOperator::LowXor(_) = binary.operator {
                 return get_definitely_evaluated_expression_after_if(binary.lhs);
             }
 
@@ -251,7 +247,7 @@ fn get_definitely_evaluated_expression_inside_if<'ast, 'arena>(
             return get_definitely_evaluated_expression_inside_if(p.expression);
         }
         Expression::Binary(binary) => {
-            if let BinaryOperator::Or(_) | BinaryOperator::LowOr(_) = binary.operator {
+            if let BinaryOperator::Or(_) | BinaryOperator::LowOr(_) | BinaryOperator::LowXor(_) = binary.operator {
                 return get_definitely_evaluated_expression_inside_if(binary.lhs);
             }
 

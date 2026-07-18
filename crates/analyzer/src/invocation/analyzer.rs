@@ -175,6 +175,7 @@ where
             *argument_offset,
             &mut analyzed_argument_types,
             parameter.is_some_and(|p| p.1.is_by_reference()),
+            parameter.is_some_and(|p| p.1.allows_undefined_reference_argument()),
             None,
         )?;
 
@@ -274,6 +275,7 @@ where
             *argument_offset,
             &mut analyzed_argument_types,
             parameter.is_some_and(|p| p.1.is_by_reference()),
+            parameter.is_some_and(|p| p.1.allows_undefined_reference_argument()),
             parameter_type.as_ref(),
         )?;
 
@@ -610,6 +612,7 @@ where
                         usize::MAX,
                         &mut analyzed_argument_types,
                         last_parameter_ref.is_by_reference(),
+                        last_parameter_ref.allows_undefined_reference_argument(),
                         None,
                     )?;
                 }
@@ -718,6 +721,7 @@ where
                             usize::MAX,
                             &mut analyzed_argument_types,
                             last_parameter_ref.is_by_reference(),
+                            last_parameter_ref.allows_undefined_reference_argument(),
                             None,
                         )?;
                     }
@@ -784,6 +788,7 @@ where
                                 argument_expression,
                                 usize::MAX,
                                 &mut analyzed_argument_types,
+                                false,
                                 false,
                                 None,
                             )?;

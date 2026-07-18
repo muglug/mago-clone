@@ -11,6 +11,7 @@ use mago_codex::assertion::Assertion;
 use mago_codex::ttype::TType;
 use mago_span::Span;
 use mago_word::Word;
+use mago_word::WordSet;
 use mago_word::concat_word;
 use mago_word::empty_word;
 use mago_word::word;
@@ -24,6 +25,13 @@ pub struct Clause {
     pub wedge: bool,
     pub reconcilable: bool,
     pub generated: bool,
+    /// Variables reassigned while evaluating the conditional that produced
+    /// this clause. The ordinary possibilities for these variables describe
+    /// their post-assignment values, so they must supersede stale earlier truths.
+    ///
+    /// This deliberately mirrors Pzoom's clause contract: clauses carry only
+    /// provenance, never a second map of reconciled or assigned variable types.
+    pub redefined_vars: WordSet,
 }
 
 impl PartialEq for Clause {
@@ -54,15 +62,43 @@ impl Clause {
         reconcilable: Option<bool>,
         generated: Option<bool>,
     ) -> Clause {
+        let redefined_vars = WordSet::default();
         Clause {
             condition_span,
             span,
             wedge: wedge.unwrap_or(false),
             reconcilable: reconcilable.unwrap_or(true),
             generated: generated.unwrap_or(false),
-            hash: get_hash(&possibilities, span, wedge.unwrap_or(false), reconcilable.unwrap_or(true)),
+            hash: get_hash(&possibilities, &redefined_vars, span, wedge.unwrap_or(false), reconcilable.unwrap_or(true)),
             possibilities,
+            redefined_vars,
         }
+    }
+
+    /// Marks an assertion in this clause as describing a variable after an
+    /// assignment performed by the conditional.
+    #[inline]
+    #[must_use]
+    pub fn mark_redefined(mut self, var_id: Word) -> Clause {
+        if self.redefined_vars.insert(var_id) {
+            self.refresh_hash();
+        }
+
+        self
+    }
+
+    /// Carries assignment provenance through an algebraic clause rewrite.
+    #[inline]
+    #[must_use]
+    pub fn with_redefined_vars(mut self, redefined_vars: WordSet) -> Clause {
+        self.redefined_vars = redefined_vars;
+        self.refresh_hash();
+        self
+    }
+
+    #[inline]
+    fn refresh_hash(&mut self) {
+        self.hash = get_hash(&self.possibilities, &self.redefined_vars, self.span, self.wedge, self.reconcilable);
     }
 
     #[inline]
@@ -76,14 +112,17 @@ impl Clause {
             return None;
         }
 
-        Some(Clause::new(
-            possibilities,
-            self.condition_span,
-            self.span,
-            Some(self.wedge),
-            Some(self.reconcilable),
-            Some(self.generated),
-        ))
+        Some(
+            Clause::new(
+                possibilities,
+                self.condition_span,
+                self.span,
+                Some(self.wedge),
+                Some(self.reconcilable),
+                Some(self.generated),
+            )
+            .with_redefined_vars(self.redefined_vars.clone()),
+        )
     }
 
     #[inline]
@@ -101,6 +140,7 @@ impl Clause {
             Some(self.reconcilable),
             Some(self.generated),
         )
+        .with_redefined_vars(self.redefined_vars.clone())
     }
 
     #[inline]
@@ -187,6 +227,7 @@ impl Clause {
 #[inline]
 fn get_hash(
     possibilities: &IndexMap<Word, IndexMap<u64, Assertion>>,
+    redefined_vars: &WordSet,
     clause_span: Span,
     wedge: bool,
     reconcilable: bool,
@@ -206,6 +247,13 @@ fn get_hash(
                 i.hash(&mut hasher);
                 1.hash(&mut hasher);
             }
+        }
+
+        let mut redefined_vars = redefined_vars.iter().copied().collect::<Vec<_>>();
+        redefined_vars.sort_unstable();
+        for var_id in redefined_vars {
+            var_id.hash(&mut hasher);
+            2.hash(&mut hasher);
         }
 
         hasher.finish() as u32

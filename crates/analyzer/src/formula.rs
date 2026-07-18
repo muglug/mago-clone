@@ -150,14 +150,19 @@ where
                         type_map.insert(assertion.to_hash(), assertion);
                         clause_map.insert(var_name, type_map);
 
-                        return Some(vec![Clause::new(
+                        let clause = Clause::new(
                             clause_map,
                             conditional_object_id,
                             creating_object_id,
                             Some(false),
                             Some(true),
                             Some(false),
-                        )]);
+                        );
+                        return Some(vec![if matches!(unwrap_expression(binary.rhs), Expression::Assignment(_)) {
+                            clause.mark_redefined(var_name)
+                        } else {
+                            clause
+                        }]);
                     }
 
                     let formula = get_formula(
@@ -201,14 +206,19 @@ where
                         type_map.insert(assertion.to_hash(), assertion);
                         clause_map.insert(var_name, type_map);
 
-                        return Some(vec![Clause::new(
+                        let clause = Clause::new(
                             clause_map,
                             conditional_object_id,
                             creating_object_id,
                             Some(false),
                             Some(true),
                             Some(false),
-                        )]);
+                        );
+                        return Some(vec![if matches!(unwrap_expression(binary.lhs), Expression::Assignment(_)) {
+                            clause.mark_redefined(var_name)
+                        } else {
+                            clause
+                        }]);
                     }
 
                     let formula = get_formula(
@@ -241,10 +251,10 @@ where
 
             for assertions in scraped_assertions {
                 for (var, anded_types) in assertions {
-                    let var = if let Some(stripped) = var.as_bytes().strip_prefix(b"=") {
-                        mago_word::word(stripped)
+                    let (var, redefined) = if let Some(stripped) = var.as_bytes().strip_prefix(b"=") {
+                        (mago_word::word(stripped), true)
                     } else {
-                        var
+                        (var, false)
                     };
 
                     for orred_types in anded_types {
@@ -255,7 +265,7 @@ where
                             .map(|orred_type| (orred_type.to_hash(), orred_type))
                             .collect::<IndexMap<_, _>>();
 
-                        clauses.push(Clause::new(
+                        let mut clause = Clause::new(
                             {
                                 let mut map = IndexMap::new();
                                 map.insert(var, mapped_orred_types);
@@ -266,7 +276,11 @@ where
                             Some(false),
                             Some(true),
                             Some(has_equality),
-                        ));
+                        );
+                        if redefined {
+                            clause = clause.mark_redefined(var);
+                        }
+                        clauses.push(clause);
 
                         if clauses.len() > usize::from(formula_size_threshold) {
                             return None;
@@ -531,13 +545,18 @@ fn get_formula_from_assertions(
     let mut clauses = Vec::new();
     for assertions in anded_assertions {
         for (var_id, anded_types) in assertions {
+            let (var_id, redefined) = if let Some(stripped) = var_id.as_bytes().strip_prefix(b"=") {
+                (mago_word::word(stripped), true)
+            } else {
+                (var_id, false)
+            };
             for orred_types in anded_types {
                 let Some(first_type) = orred_types.first() else {
                     continue; // should not happen
                 };
 
                 let has_equality = first_type.has_equality();
-                clauses.push(Clause::new(
+                let clause = Clause::new(
                     {
                         let mut map = IndexMap::new();
                         map.insert(
@@ -551,7 +570,8 @@ fn get_formula_from_assertions(
                     Some(false),
                     Some(true),
                     Some(has_equality),
-                ));
+                );
+                clauses.push(if redefined { clause.mark_redefined(var_id) } else { clause });
             }
         }
     }

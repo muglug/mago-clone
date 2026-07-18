@@ -429,8 +429,32 @@ pub fn saturate_clauses<'clause>(
 
     let mut seen: HashSet<u32> = HashSet::default();
     let unique_clauses: Vec<&Clause> = clauses.into_iter().filter(|c| seen.insert(c.hash)).collect();
+    let mut previous_hashes = unique_clauses.iter().map(|clause| clause.hash).collect::<HashSet<_>>();
+    let mut saturated = saturate_clauses_inner(
+        unique_clauses,
+        thresholds.saturation_complexity.into(),
+        thresholds.consensus_limit.into(),
+    );
 
-    saturate_clauses_inner(unique_clauses, thresholds.saturation_complexity.into(), thresholds.consensus_limit.into())
+    // Assignment-aware simplification can expose a new unit clause that only
+    // becomes useful after the first propagation round. Iterate to a bounded
+    // fixed point, matching Pzoom/Psalm's behavior without making pathological
+    // formulas unbounded.
+    for _ in 1..10 {
+        let saturated_hashes = saturated.iter().map(|clause| clause.hash).collect::<HashSet<_>>();
+        if saturated_hashes == previous_hashes {
+            break;
+        }
+
+        previous_hashes = saturated_hashes;
+        saturated = saturate_clauses_inner(
+            saturated.iter().collect(),
+            thresholds.saturation_complexity.into(),
+            thresholds.consensus_limit.into(),
+        );
+    }
+
+    saturated
 }
 
 /// Extracts simple assertions from a set of clauses and identifies which are "active".
@@ -481,7 +505,7 @@ pub fn find_satisfying_assignments(
         if !clause.generated {
             for var_id in clause.possibilities.keys() {
                 // We only care about actual variables, not temporary expression placeholders.
-                if !var_id.as_bytes().starts_with(b"*") {
+                if !var_id.as_bytes().starts_with(b"*") && !clause.redefined_vars.contains(var_id) {
                     conditionally_referenced_var_ids.insert(*var_id);
                 }
             }
@@ -504,9 +528,16 @@ pub fn find_satisfying_assignments(
         }
 
         let assertions = possible_types.values().cloned().collect::<Vec<_>>();
-        let truth_entry = truths.entry(*variable_id).or_default();
-        let new_truth_index = truth_entry.len();
-        truth_entry.push(assertions);
+        let new_truth_index = if clause.redefined_vars.contains(variable_id) {
+            truths.insert(*variable_id, vec![assertions]);
+            active_truths.shift_remove(variable_id);
+            0
+        } else {
+            let truth_entry = truths.entry(*variable_id).or_default();
+            let new_truth_index = truth_entry.len();
+            truth_entry.push(assertions);
+            new_truth_index
+        };
 
         if let Some(creating_conditional_id) = creating_conditional_id
             && creating_conditional_id == clause.condition_span
@@ -594,7 +625,12 @@ pub fn disjoin_clauses(
                 continue;
             }
 
-            let mut possibilities = left_clause.possibilities.clone();
+            let mut possibilities = IndexMap::new();
+            for (var, possible_types) in &left_clause.possibilities {
+                if !right_clause.redefined_vars.contains(var) {
+                    possibilities.insert(*var, possible_types.clone());
+                }
+            }
             for (var, possible_types) in &right_clause.possibilities {
                 match possibilities.get_mut(var) {
                     Some(existing) => {
@@ -811,4 +847,74 @@ where
     T: Eq + Ord + Hash,
 {
     map1.len() == map2.len() && map1.keys().all(|k| map2.contains_key(k))
+}
+
+#[cfg(test)]
+mod tests {
+    use mago_span::Span;
+    use mago_word::word;
+
+    use super::*;
+
+    fn clause(assertions: &[(Word, Assertion)], offset: u32) -> Clause {
+        let mut possibilities = IndexMap::new();
+        for (var_id, assertion) in assertions {
+            possibilities.insert(*var_id, IndexMap::from([(assertion.to_hash(), assertion.clone())]));
+        }
+
+        Clause::new(possibilities, Span::dummy(offset, offset + 1), Span::dummy(offset, offset + 1), None, None, None)
+    }
+
+    #[test]
+    fn saturation_propagates_units_to_a_fixed_point() {
+        let a = word("$a");
+        let b = word("$b");
+        let c = word("$c");
+        let clauses = [
+            clause(&[(a, Assertion::Truthy)], 1),
+            clause(&[(a, Assertion::Falsy), (b, Assertion::Truthy)], 2),
+            clause(&[(b, Assertion::Falsy), (c, Assertion::Truthy)], 3),
+        ];
+
+        let saturated = saturate_clauses(&clauses, &AlgebraThresholds::default());
+        let (truths, _) = find_satisfying_assignments(&saturated, None, &mut WordSet::default());
+
+        assert!(truths.contains_key(&a));
+        assert!(truths.contains_key(&b));
+        assert!(truths.contains_key(&c));
+    }
+
+    #[test]
+    fn redefined_truth_replaces_pre_assignment_truth() {
+        let value = word("$value");
+        let before = clause(&[(value, Assertion::Truthy)], 1);
+        let after = clause(&[(value, Assertion::Falsy)], 2).mark_redefined(value);
+
+        let (truths, _) = find_satisfying_assignments(&[before, after], None, &mut WordSet::default());
+
+        assert_eq!(truths[&value], vec![vec![Assertion::Falsy]]);
+    }
+
+    #[test]
+    fn disjunction_drops_stale_fact_before_redefinition() {
+        let value = word("$value");
+        let before = clause(&[(value, Assertion::Truthy)], 1);
+        let after = clause(&[(value, Assertion::Falsy)], 2).mark_redefined(value);
+
+        let disjoined = disjoin_clauses(vec![before], vec![after], Span::dummy(1, 3), &AlgebraThresholds::default());
+
+        assert_eq!(disjoined.len(), 1);
+        assert!(!disjoined[0].redefined_vars.contains(&value));
+        assert_eq!(disjoined[0].possibilities[&value].values().collect::<Vec<_>>(), vec![&Assertion::Falsy]);
+    }
+
+    #[test]
+    fn assignment_provenance_participates_in_clause_identity() {
+        let value = word("$value");
+        let clause = clause(&[(value, Assertion::Truthy)], 1);
+        let redefined = clause.clone().mark_redefined(value);
+
+        assert_ne!(clause.hash, redefined.hash);
+        assert_ne!(clause, redefined);
+    }
 }

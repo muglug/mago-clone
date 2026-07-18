@@ -678,6 +678,7 @@ test_case!(method_signature_param_types);
 test_case!(method_signature_return_types);
 test_case!(return_type_override_native_vs_docblock);
 test_case!(conditional_return_with_default_parameters);
+test_case!(conditional_assignment_provenance);
 test_case!(conditional_return_class_string_not_literal);
 test_case!(conditional_return_class_string_selection);
 test_case!(method_signature_visibility);

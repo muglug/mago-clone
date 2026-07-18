@@ -1791,6 +1791,9 @@ function fprintf($stream, string $format, mixed ...$values): int {}
  */
 function vfprintf($stream, string $format, array $values): int {}
 
+/**
+ * @param-out string|int|float|null $vars
+ */
 function sscanf(string $string, string $format, mixed &...$vars): array|int|null {}
 
 /**
@@ -1850,7 +1853,7 @@ function unlink(string $filename, mixed $context = null): bool {}
  * @param-out list<string> $output
  * @param-out int $result_code
  */
-function exec(string $command, ?array &$output = null, int|int &$result_code = null): string|false {}
+function exec(string $command, ?array &$output = null, null|int &$result_code = null): string|false {}
 
 /**
  * @param-out int $result_code

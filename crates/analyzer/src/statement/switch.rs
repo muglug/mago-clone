@@ -77,11 +77,13 @@ where
     new_locals: Option<WordMap<Rc<TUnion>>>,
     redefined_variables: Option<WordMap<Rc<TUnion>>>,
     possibly_redefined_variables: Option<WordMap<Rc<TUnion>>>,
+    removed_variable_ids: WordSet,
+    new_variables_possibly_in_scope: WordSet,
     leftover_statements: Vec<Statement<'arena>>,
     leftover_case_equality_expression: Option<Expression<'arena>>,
     has_fallthrough: bool,
     negated_clauses: Vec<Clause>,
-    new_assigned_variable_ids: WordMap<u32>,
+    new_assigned_variable_ids: Option<WordMap<u32>>,
     last_case_exit_type: ControlAction,
     case_exit_types: HashMap<usize, ControlAction>,
     case_actions: HashMap<usize, ControlActionSet>,
@@ -106,11 +108,13 @@ where
             new_locals: None,
             redefined_variables: None,
             possibly_redefined_variables: None,
+            removed_variable_ids: WordSet::default(),
+            new_variables_possibly_in_scope: WordSet::default(),
             leftover_statements: vec![],
             leftover_case_equality_expression: None,
             has_fallthrough: false,
             negated_clauses: vec![],
-            new_assigned_variable_ids: WordMap::default(),
+            new_assigned_variable_ids: None,
             last_case_exit_type: ControlAction::Break,
             case_exit_types: HashMap::default(),
             case_actions: HashMap::default(),
@@ -251,8 +255,13 @@ where
             }
         }
 
+        self.block_context.locals.retain(|variable_id, _| !self.removed_variable_ids.contains(variable_id));
+        self.block_context.variables_possibly_in_scope.extend(self.new_variables_possibly_in_scope);
+
         self.artifacts.fully_matched_switch_offsets.insert(switch.start_position().offset);
-        self.block_context.assigned_variable_ids.extend(self.new_assigned_variable_ids);
+        if is_exhaustive {
+            self.block_context.assigned_variable_ids.extend(self.new_assigned_variable_ids.unwrap_or_default());
+        }
         self.block_context.flags.set_has_returned(all_options_returned && is_exhaustive);
 
         Ok(())
@@ -581,6 +590,9 @@ where
             extract_function_constant_existence(case_condition, self.artifacts, &mut case_block_context, false);
         }
 
+        let post_condition_locals = case_block_context.locals.clone();
+        let pre_case_assigned_variable_ids = case_block_context.assigned_variable_ids.clone();
+
         if !case_clauses.is_empty()
             && let Some(case_equality_expr) = &case_equality_expression
         {
@@ -642,8 +654,18 @@ where
             case_exit_type
         };
 
+        let mut case_assigned_variable_ids = case_block_context.assigned_variable_ids.clone();
+        case_assigned_variable_ids
+            .retain(|variable_id, count| pre_case_assigned_variable_ids.get(variable_id) != Some(count));
+
         if !matches!(case_exit_type, ControlAction::Return) {
-            self.handle_non_returning_case(&case_block_context, original_block_context, case_exit_type);
+            self.handle_non_returning_case(
+                &case_block_context,
+                original_block_context,
+                &post_condition_locals,
+                case_assigned_variable_ids,
+                case_exit_type,
+            );
         }
 
         inherit_branch_context_properties(self.context, self.block_context, &case_block_context);
@@ -722,6 +744,8 @@ where
         &mut self,
         case_block_context: &BlockContext<'ctx>,
         original_block_context: &BlockContext<'ctx>,
+        post_condition_locals: &WordMap<Rc<TUnion>>,
+        case_assigned_variable_ids: WordMap<u32>,
         case_exit_type: ControlAction,
     ) {
         if matches!(case_exit_type, ControlAction::Continue) {
@@ -731,6 +755,34 @@ where
         let mut removed_var_ids = WordSet::default();
         let case_redefined_vars =
             case_block_context.get_redefined_locals(&original_block_context.locals, false, &mut removed_var_ids);
+        removed_var_ids.retain(|variable_id| post_condition_locals.contains_key(variable_id));
+        self.removed_variable_ids.extend(removed_var_ids);
+        self.new_variables_possibly_in_scope.extend(
+            case_block_context
+                .locals
+                .keys()
+                .filter(|variable_id| !original_block_context.locals.contains_key(variable_id))
+                .copied(),
+        );
+        self.new_variables_possibly_in_scope.extend(
+            case_block_context
+                .variables_possibly_in_scope
+                .iter()
+                .filter(|variable_id| !original_block_context.variables_possibly_in_scope.contains(variable_id))
+                .copied(),
+        );
+
+        match &mut self.new_assigned_variable_ids {
+            Some(assigned_variable_ids) => {
+                assigned_variable_ids.retain(|variable_id, _| case_assigned_variable_ids.contains_key(variable_id));
+                for (variable_id, count) in case_assigned_variable_ids {
+                    if let Some(existing_count) = assigned_variable_ids.get_mut(&variable_id) {
+                        *existing_count = count;
+                    }
+                }
+            }
+            None => self.new_assigned_variable_ids = Some(case_assigned_variable_ids),
+        }
 
         if let Some(possibly_redefined_var_ids) = &mut self.possibly_redefined_variables {
             for (var_id, var_type) in &case_redefined_vars {

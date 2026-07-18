@@ -387,6 +387,8 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for If<'arena> {
             .collect();
         }
 
+        block_context.locals.retain(|variable_id, _| !if_scope.removed_variable_ids.contains(variable_id));
+
         for (variable_id, variable_type) in if_scope.possibly_redefined_variables {
             let Some(existing_type) = block_context.locals.remove(&variable_id).map(Rc::unwrap_or_clone) else {
                 continue;
@@ -566,6 +568,17 @@ where
 
     inherit_branch_context_properties(context, outer_block_context, &if_block_context);
 
+    if_scope.negatable_if_types = if_scope
+        .negated_types
+        .keys()
+        .filter(|variable_id| {
+            pre_assignment_else_redefined_locals.contains_key(variable_id)
+                && !(old_if_block_context.locals.contains_key(variable_id)
+                    && !if_block_context.locals.contains_key(variable_id))
+        })
+        .copied()
+        .collect();
+
     if !has_leaving_statements {
         let new_assigned_variable_ids_keys = new_assigned_variable_ids.keys().copied().collect::<Vec<Word>>();
 
@@ -574,6 +587,7 @@ where
             if_scope,
             &mut if_block_context,
             outer_block_context,
+            &old_if_block_context.locals,
             new_assigned_variable_ids,
             new_possibly_assigned_variable_ids,
             &if_scope.conditionally_changed_variable_ids.clone(),
@@ -610,20 +624,13 @@ where
         // branch ends with a `break`; reasonable clauses stay as-is
     }
 
-    if !if_scope.negated_types.is_empty() {
-        let variables_to_update = if_scope
-            .negated_types
-            .keys()
-            .filter(|key| pre_assignment_else_redefined_locals.contains_key(key))
-            .copied()
-            .collect::<WordSet>();
-
+    if !if_scope.negatable_if_types.is_empty() {
         outer_block_context.update(
             context,
             &old_if_block_context,
             &mut if_block_context,
             has_leaving_statements,
-            &variables_to_update,
+            &if_scope.negatable_if_types,
             &mut if_scope.updated_variables,
         );
     }
@@ -891,6 +898,7 @@ where
         }
     }
 
+    let post_condition_else_if_locals = else_if_block_context.locals.clone();
     let pre_assigned_variable_ids = std::mem::take(&mut else_if_block_context.assigned_variable_ids);
     let pre_possibly_assigned_variable_ids = std::mem::take(&mut else_if_block_context.possibly_assigned_variable_ids);
 
@@ -954,6 +962,7 @@ where
             if_scope,
             &mut else_if_block_context,
             outer_block_context,
+            &post_condition_else_if_locals,
             new_assigned_variable_ids.into_iter().chain(assigned_in_conditional_variable_ids).collect(),
             new_possibly_assigned_variable_ids.clone(),
             &newly_reconciled_variable_ids,
@@ -1069,17 +1078,14 @@ where
         &mut WordSet::default(),
     );
 
-    let mut original_context = else_block_context.clone();
-
+    let mut else_changed_variable_ids = WordSet::default();
     if !else_types.is_empty() {
-        let mut changed_variable_ids = WordSet::default();
-
         reconcile_keyed_types(
             context,
             &else_types,
             IndexMap::new(),
             else_block_context,
-            &mut changed_variable_ids,
+            &mut else_changed_variable_ids,
             &WordSet::default(),
             &else_span,
             false,
@@ -1088,7 +1094,7 @@ where
 
         else_block_context.clauses = BlockContext::remove_reconciled_clauses(
             &else_block_context.clauses.iter().map(Rc::deref).cloned().collect(),
-            &changed_variable_ids,
+            &else_changed_variable_ids,
         )
         .0
         .into_iter()
@@ -1096,14 +1102,14 @@ where
         .collect();
 
         let mut variables_to_remove = vec![];
-        for changed_variable_id in &changed_variable_ids {
+        for changed_variable_id in &else_changed_variable_ids {
             for variable_id in else_block_context.locals.keys() {
                 if variable_id.eq(changed_variable_id) {
                     continue;
                 }
 
                 if is_derived_access_path(*variable_id, *changed_variable_id)
-                    && !changed_variable_ids.contains(variable_id)
+                    && !else_changed_variable_ids.contains(variable_id)
                 {
                     variables_to_remove.push(*variable_id);
                 }
@@ -1114,6 +1120,13 @@ where
             else_block_context.remove_possible_reference(variable_id.as_bytes());
         }
     }
+
+    if_scope.negatable_if_types.extend(
+        else_changed_variable_ids
+            .iter()
+            .filter(|variable_id| outer_block_context.locals.contains_key(variable_id))
+            .copied(),
+    );
 
     // Check if any variable has become `never` after reconciliation, indicating the else clause is unreachable
     let is_unreachable =
@@ -1194,7 +1207,8 @@ where
             context,
             if_scope,
             else_block_context,
-            &mut original_context,
+            outer_block_context,
+            &old_else_context.locals,
             new_assigned_variable_ids,
             new_possibly_assigned_variable_ids.clone(),
             &if_scope.conditionally_changed_variable_ids.clone(),
@@ -1204,10 +1218,10 @@ where
         if_scope.reasonable_clauses = vec![];
     }
 
-    if !if_scope.negated_types.is_empty() {
+    if !if_scope.negatable_if_types.is_empty() {
         let variables_to_update = if_scope
-            .negated_types
-            .keys()
+            .negatable_if_types
+            .iter()
             .copied()
             .filter(|var| outer_block_context.locals.contains_key(var))
             .collect::<WordSet>();
@@ -1301,6 +1315,7 @@ fn update_if_scope<'ctx, A>(
     if_scope: &mut IfScope<'ctx>,
     if_block_context: &mut BlockContext<'ctx>,
     outer_block_context: &mut BlockContext<'ctx>,
+    post_condition_locals: &WordMap<Rc<TUnion>>,
     new_assigned_variable_ids: WordMap<u32>,
     new_possibly_assigned_variable_ids: WordSet,
     newly_reconciled_variable_ids: &WordSet,
@@ -1342,8 +1357,11 @@ fn update_if_scope<'ctx, A>(
 
         outer_block_context.called_methods.extend(if_block_context.called_methods.iter().copied());
     }
+    let mut removed_variables = WordSet::default();
     let mut redefined_variables =
-        if_block_context.get_redefined_locals(&outer_block_context.locals, false, &mut WordSet::default());
+        if_block_context.get_redefined_locals(&outer_block_context.locals, false, &mut removed_variables);
+    removed_variables.retain(|variable_id| post_condition_locals.contains_key(variable_id));
+    if_scope.removed_variable_ids.extend(removed_variables);
 
     match &mut if_scope.new_variables {
         Some(new_variables) => {
@@ -1391,7 +1409,12 @@ fn update_if_scope<'ctx, A>(
 
     match &mut if_scope.assigned_variable_ids {
         Some(assigned_variable_ids) => {
-            assigned_variable_ids.extend(new_assigned_variable_ids);
+            assigned_variable_ids.retain(|variable_id, _| new_assigned_variable_ids.contains_key(variable_id));
+            for (variable_id, assignment_count) in new_assigned_variable_ids {
+                if let Some(existing_count) = assigned_variable_ids.get_mut(&variable_id) {
+                    *existing_count = assignment_count;
+                }
+            }
         }
         None => {
             if_scope.assigned_variable_ids = Some(new_assigned_variable_ids);

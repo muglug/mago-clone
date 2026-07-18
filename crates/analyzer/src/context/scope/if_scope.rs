@@ -18,11 +18,18 @@ pub struct IfScope<'ctx> {
     pub new_variables: Option<WordMap<Rc<TUnion>>>,
     pub new_variables_possibly_in_scope: WordSet,
     pub redefined_variables: Option<WordMap<Rc<TUnion>>>,
+    /// Variables present on entry to a branch body but removed by that body.
+    /// Keeping this explicit prevents a later branch join from accidentally
+    /// resurrecting invalidated dependent access paths.
+    pub removed_variable_ids: WordSet,
     pub assigned_variable_ids: Option<WordMap<u32>>,
     pub possibly_assigned_variable_ids: WordSet,
     pub possibly_redefined_variables: WordMap<Rc<TUnion>>,
     pub updated_variables: WordSet,
     pub negated_types: IndexMap<Word, AssertionSet>,
+    /// Negated condition facts that genuinely changed the hypothetical else
+    /// context and are therefore safe to push through `BlockContext::update`.
+    pub negatable_if_types: WordSet,
     pub conditionally_changed_variable_ids: WordSet,
     pub negated_clauses: Vec<Clause>,
     pub reasonable_clauses: Vec<Rc<Clause>>,
@@ -45,11 +52,13 @@ impl IfScope<'_> {
             new_variables: None,
             new_variables_possibly_in_scope: WordSet::default(),
             redefined_variables: None,
+            removed_variable_ids: WordSet::default(),
             assigned_variable_ids: None,
             possibly_assigned_variable_ids: WordSet::default(),
             possibly_redefined_variables: WordMap::default(),
             updated_variables: WordSet::default(),
             negated_types: IndexMap::default(),
+            negatable_if_types: WordSet::default(),
             conditionally_changed_variable_ids: WordSet::default(),
             negated_clauses: Vec::default(),
             reasonable_clauses: Vec::default(),

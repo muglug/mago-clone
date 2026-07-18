@@ -49,6 +49,32 @@ pub enum OtherValuePosition {
     Right,
 }
 
+/// Returns the access path described by an assertion. Assignment expressions
+/// are marked at the assertion source, following Pzoom's formula contract: the
+/// formula layer strips the marker and records the path in
+/// `Clause::redefined_vars`.
+fn get_assertable_expression_id<A>(
+    expression: &Expression,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<Word>
+where
+    A: Arena,
+{
+    let expression = unwrap_expression(expression);
+    let expression_id = get_expression_id(
+        expression,
+        assertion_context.this_class_name,
+        assertion_context.resolved_names,
+        Some(assertion_context.codebase),
+    )?;
+
+    if matches!(expression, Expression::Assignment(_)) {
+        Some(concat_word!(b"=", expression_id.as_bytes()))
+    } else {
+        Some(expression_id)
+    }
+}
+
 pub fn scrape_assertions<A>(
     mut expression: &Expression,
     artifacts: &AnalysisArtifacts,
@@ -61,12 +87,7 @@ where
 
     let mut if_types = WordMap::default();
 
-    if let Some(var_name) = get_expression_id(
-        expression,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    ) {
+    if let Some(var_name) = get_assertable_expression_id(expression, assertion_context) {
         if_types.insert(var_name, vec![vec![Assertion::Truthy]]);
     }
 
@@ -105,12 +126,8 @@ where
             if let Call::Function(FunctionCall { function: _, argument_list }) = call
                 && 1 == argument_list.arguments.len()
                 && let Some(first_argument) = argument_list.arguments.first()
-                && let Some(first_argument_expression_id) = get_expression_id(
-                    first_argument.value(),
-                    assertion_context.this_class_name,
-                    assertion_context.resolved_names,
-                    Some(assertion_context.codebase),
-                )
+                && let Some(first_argument_expression_id) =
+                    get_assertable_expression_id(first_argument.value(), assertion_context)
             {
                 if is_count_or_size_of_call(expression, assertion_context) {
                     if_types.insert(first_argument_expression_id, vec![vec![Assertion::NonEmptyCountable(true)]]);
@@ -154,12 +171,7 @@ where
         }
         Expression::Construct(construct) => match construct {
             Construct::Empty(empty_construct) => {
-                let Some(value_id) = get_expression_id(
-                    empty_construct.value,
-                    assertion_context.this_class_name,
-                    assertion_context.resolved_names,
-                    Some(assertion_context.codebase),
-                ) else {
+                let Some(value_id) = get_assertable_expression_id(empty_construct.value, assertion_context) else {
                     return vec![];
                 };
 
@@ -175,12 +187,7 @@ where
             }
             Construct::Isset(isset_construct) => {
                 for value in &isset_construct.values {
-                    if let Some(value_id) = get_expression_id(
-                        value,
-                        assertion_context.this_class_name,
-                        assertion_context.resolved_names,
-                        Some(assertion_context.codebase),
-                    ) {
+                    if let Some(value_id) = get_assertable_expression_id(value, assertion_context) {
                         if let Expression::Variable(variable) = value
                             && let Some(expression_type) = artifacts.get_expression_type(variable)
                             && !expression_type.is_mixed()
@@ -218,12 +225,7 @@ where
             BinaryOperator::NullCoalesce(_) => {
                 let rhs = unwrap_expression(binary.rhs);
                 if matches!(rhs, Expression::Literal(Literal::Null(_))) {
-                    let var_name = get_expression_id(
-                        binary.lhs,
-                        assertion_context.this_class_name,
-                        assertion_context.resolved_names,
-                        Some(assertion_context.codebase),
-                    );
+                    let var_name = get_assertable_expression_id(binary.lhs, assertion_context);
 
                     if let Some(var_name) = var_name {
                         if_types.insert(var_name, vec![vec![Assertion::IsIsset]]);
@@ -565,12 +567,7 @@ where
     };
 
     let extract_expression_id = |argument_expression: &Expression| {
-        if let Some(id) = get_expression_id(
-            argument_expression,
-            assertion_context.this_class_name,
-            assertion_context.resolved_names,
-            Some(assertion_context.codebase),
-        ) {
+        if let Some(id) = get_assertable_expression_id(argument_expression, assertion_context) {
             return Some((id, false));
         }
 
@@ -666,7 +663,7 @@ where
     }
 
     if let Some(false_position) = has_false_variable(left, right, artifacts) {
-        return get_false_equality_assertions(left, is_identity, right, assertion_context, false_position);
+        return get_false_equality_assertions(left, is_identity, right, artifacts, assertion_context, false_position);
     }
 
     if let Some(empty_array_position) = has_empty_array_variable(left, right) {
@@ -750,7 +747,7 @@ where
     }
 
     if let Some(null_position) = has_null_variable(left, right, artifacts) {
-        return get_null_inequality_assertions(left, right, assertion_context, null_position);
+        return get_null_inequality_assertions(left, right, artifacts, assertion_context, null_position);
     }
 
     if let Some(false_position) = has_false_variable(left, right, artifacts) {
@@ -797,39 +794,43 @@ where
 {
     let left_class_part = is_class_constant_access(left);
     let right_class_part = is_class_constant_access(right);
+    let left_get_class_argument = get_get_class_argument(left, assertion_context);
+    let right_get_class_argument = get_get_class_argument(right, assertion_context);
 
-    let (variable_expr, class_name_expr) = match (left_class_part, right_class_part) {
-        // Case 1: Both sides are `::class` expressions (e.g., `$var::class === Foo::class`)
-        (Some(left_part), Some(right_part)) => {
-            let left_is_static = is_static_class_reference(left_part);
-            let right_is_static = is_static_class_reference(right_part);
+    let (variable_expr, class_name_expr) =
+        if let (Some(variable), Some(_)) = (left_get_class_argument, right_class_part) {
+            (variable, right)
+        } else if let (Some(variable), Some(_)) = (right_get_class_argument, left_class_part) {
+            (variable, left)
+        } else {
+            match (left_class_part, right_class_part) {
+                // Case 1: Both sides are `::class` expressions (e.g., `$var::class === Foo::class`)
+                (Some(left_part), Some(right_part)) => {
+                    let left_is_static = is_static_class_reference(left_part);
+                    let right_is_static = is_static_class_reference(right_part);
 
-            if !left_is_static && right_is_static {
-                // $var::class === Foo::class  =>  $var is the variable, Foo::class is the type
-                (left_part, right)
-            } else if left_is_static && !right_is_static {
-                // Foo::class === $var::class  =>  $var is the variable, Foo::class is the type
-                (right_part, left)
-            } else {
-                // Both are dynamic ($a::class === $b::class) or both static (A::class === B::class).
-                // Let the standard reconciler handle these comparisons.
-                return None;
+                    if !left_is_static && right_is_static {
+                        // $var::class === Foo::class  =>  $var is the variable, Foo::class is the type
+                        (left_part, right)
+                    } else if left_is_static && !right_is_static {
+                        // Foo::class === $var::class  =>  $var is the variable, Foo::class is the type
+                        (right_part, left)
+                    } else {
+                        // Both are dynamic ($a::class === $b::class) or both static (A::class === B::class).
+                        // Let the standard reconciler handle these comparisons.
+                        return None;
+                    }
+                }
+                // Case 2: Only the left side is `::class`
+                (Some(part), None) => (part, right),
+                // Case 3: Only the right side is `::class`
+                (None, Some(part)) => (part, left),
+                // Case 4: Neither side is `::class`
+                (None, None) => return None,
             }
-        }
-        // Case 2: Only the left side is `::class`
-        (Some(part), None) => (part, right),
-        // Case 3: Only the right side is `::class`
-        (None, Some(part)) => (part, left),
-        // Case 4: Neither side is `::class`
-        (None, None) => return None,
-    };
+        };
 
-    let variable_id = get_expression_id(
-        variable_expr,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    )?;
+    let variable_id = get_assertable_expression_id(variable_expr, assertion_context)?;
 
     let class_name_type = artifacts.get_expression_type(class_name_expr)?;
 
@@ -859,6 +860,28 @@ where
     let mut if_types = WordMap::default();
     if_types.insert(variable_id, vec![assertions]);
     Some(vec![if_types])
+}
+
+/// Returns the subject of a one-argument `get_class()` call. Comparing the
+/// call result with `Foo::class` describes the subject object, not the string
+/// returned by the call.
+fn get_get_class_argument<'arena, A>(
+    expression: &'arena Expression<'arena>,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<&'arena Expression<'arena>>
+where
+    A: Arena,
+{
+    let expression = unwrap_expression(expression);
+    if !is_function_call_to(expression, assertion_context, b"get_class") {
+        return None;
+    }
+
+    let Expression::Call(Call::Function(function_call)) = expression else {
+        return None;
+    };
+
+    function_call.argument_list.arguments.first().map(mago_syntax::cst::Argument::value)
 }
 
 /// Helper to check if an expression is a `::class` constant access.
@@ -902,12 +925,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if is_identity {
@@ -936,12 +954,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if operator.is_identity() {
@@ -973,12 +986,7 @@ where
 
     let mut if_types = WordMap::default();
 
-    let var_name = get_expression_id(
-        variable_expression,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(variable_expression, assertion_context);
 
     if let Some(var_name) = var_name {
         if_types.insert(var_name, vec![vec![Assertion::IsType(enum_case_type.get_single().clone())]]);
@@ -1006,12 +1014,7 @@ where
 
     let mut if_types = WordMap::default();
 
-    let var_name = get_expression_id(
-        variable_expression,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(variable_expression, assertion_context);
 
     if let Some(var_name) = var_name {
         if_types.insert(var_name, vec![vec![Assertion::IsNotType(enum_case_type.get_single().clone())]]);
@@ -1050,12 +1053,7 @@ where
             if_types.insert(var_name, vec![vec![Assertion::IsNotIsset]]);
         }
     } else {
-        let var_name = get_expression_id(
-            base_conditional,
-            assertion_context.this_class_name,
-            assertion_context.resolved_names,
-            Some(assertion_context.codebase),
-        );
+        let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
         if let Some(var_name) = var_name {
             if_types.insert(var_name, vec![vec![Assertion::IsType(TAtomic::Null)]]);
@@ -1068,6 +1066,7 @@ where
 fn get_null_inequality_assertions<A>(
     left: &Expression,
     right: &Expression,
+    artifacts: &AnalysisArtifacts,
     assertion_context: AssertionContext<'_, '_, A>,
     null_position: OtherValuePosition,
 ) -> Vec<WordMap<AssertionSet>>
@@ -1106,15 +1105,22 @@ where
             // coalesce LHS isn't a tracked variable or array access; no isset assertion to record
         }
     } else {
-        let var_name = get_expression_id(
-            base_conditional,
-            assertion_context.this_class_name,
-            assertion_context.resolved_names,
-            Some(assertion_context.codebase),
-        );
+        let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
         if let Some(var_name) = var_name {
-            if_types.insert(var_name, vec![vec![Assertion::IsNotType(TAtomic::Null)]]);
+            let assertion = if matches!(unwrap_expression(base_conditional), Expression::Assignment(_)) {
+                artifacts
+                    .get_expression_type(base_conditional)
+                    .and_then(|assigned| {
+                        let mut non_null_types = assigned.types.iter().filter(|atomic| !atomic.is_null());
+                        let only = non_null_types.next()?.clone();
+                        non_null_types.next().is_none().then_some(Assertion::IsType(only))
+                    })
+                    .unwrap_or(Assertion::IsNotType(TAtomic::Null))
+            } else {
+                Assertion::IsNotType(TAtomic::Null)
+            };
+            if_types.insert(var_name, vec![vec![assertion]]);
         }
     }
 
@@ -1136,12 +1142,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if_types.insert(var_name, vec![vec![Assertion::IsNotType(TAtomic::Scalar(TScalar::r#false()))]]);
@@ -1165,12 +1166,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if_types.insert(var_name, vec![vec![Assertion::IsType(TAtomic::Scalar(TScalar::r#true()))]]);
@@ -1252,19 +1248,9 @@ where
 
     let mut if_types = WordMap::default();
 
-    let left_id = get_expression_id(
-        left,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let left_id = get_assertable_expression_id(left, assertion_context);
 
-    let right_id = get_expression_id(
-        right,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let right_id = get_assertable_expression_id(right, assertion_context);
 
     // Generate assertions for the left variable based on the right variable's type.
     // For an expression `$a < $b`, this asserts `$a` is less than the upper bound of `$b`.
@@ -1450,12 +1436,7 @@ where
     // for non-variable expressions (e.g. function calls), using a bound produces
     // incorrect narrowing when the assertion is negated for the else branch.
     if let Some(right_int) = &right_integer
-        && let Some(left_var_id) = get_expression_id(
-            left,
-            assertion_context.this_class_name,
-            assertion_context.resolved_names,
-            Some(assertion_context.codebase),
-        )
+        && let Some(left_var_id) = get_assertable_expression_id(left, assertion_context)
     {
         let use_range_bounds = get_expression_id(
             right,
@@ -1511,12 +1492,7 @@ where
     // Generate assertions for the right variable based on the left variable's type.
     // For an expression `$a > $b`, this asserts `$b` is less than the upper bound of `$a`.
     if let Some(left_int) = &left_integer
-        && let Some(right_var_id) = get_expression_id(
-            right,
-            assertion_context.this_class_name,
-            assertion_context.resolved_names,
-            Some(assertion_context.codebase),
-        )
+        && let Some(right_var_id) = get_assertable_expression_id(right, assertion_context)
     {
         let use_range_bounds = get_expression_id(
             left,
@@ -1583,7 +1559,7 @@ where
 {
     let mut if_types = WordMap::default();
 
-    let variable_id = get_expression_id(left, context.this_class_name, context.resolved_names, Some(context.codebase));
+    let variable_id = get_assertable_expression_id(left, context);
 
     if let Some(counter_variable_id) = variable_id {
         match right {
@@ -1788,12 +1764,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if is_identity {
@@ -1867,6 +1838,7 @@ fn get_false_equality_assertions<A>(
     left: &Expression,
     is_identity: bool,
     right: &Expression,
+    artifacts: &AnalysisArtifacts,
     assertion_context: AssertionContext<'_, '_, A>,
     false_position: OtherValuePosition,
 ) -> Vec<WordMap<AssertionSet>>
@@ -1879,12 +1851,7 @@ where
         OtherValuePosition::Right => left,
     };
 
-    let var_name = get_expression_id(
-        base_conditional,
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    );
+    let var_name = get_assertable_expression_id(base_conditional, assertion_context);
 
     if let Some(var_name) = var_name {
         if is_identity {
@@ -1896,7 +1863,15 @@ where
         return vec![if_types];
     }
 
-    vec![]
+    let assertions = scrape_assertions(base_conditional, artifacts, assertion_context);
+    let mut negated_assertions = WordMap::default();
+    for assertion in assertions {
+        for (var_name, assertion_set) in assertion {
+            negated_assertions.entry(var_name).or_insert_with(Vec::new).extend(negate_assertion_set(assertion_set));
+        }
+    }
+
+    if negated_assertions.is_empty() { vec![] } else { vec![negated_assertions] }
 }
 
 fn get_typed_value_equality_assertions<A>(
@@ -1914,34 +1889,14 @@ where
 
     let (var_name, other_value_var_name, var_type, other_value_type) = match typed_value_position {
         OtherValuePosition::Right => (
-            get_expression_id(
-                left,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
-            get_expression_id(
-                right,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
+            get_assertable_expression_id(left, assertion_context),
+            get_assertable_expression_id(right, assertion_context),
             artifacts.get_expression_type(&left.span()),
             artifacts.get_expression_type(&right.span()),
         ),
         OtherValuePosition::Left => (
-            get_expression_id(
-                right,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
-            get_expression_id(
-                left,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
+            get_assertable_expression_id(right, assertion_context),
+            get_assertable_expression_id(left, assertion_context),
             artifacts.get_expression_type(&right.span()),
             artifacts.get_expression_type(&left.span()),
         ),
@@ -1999,34 +1954,14 @@ where
 
     let (var_name, other_value_var_name, var_type, other_value_type) = match typed_value_position {
         OtherValuePosition::Right => (
-            get_expression_id(
-                left,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
-            get_expression_id(
-                right,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
+            get_assertable_expression_id(left, assertion_context),
+            get_assertable_expression_id(right, assertion_context),
             artifacts.get_expression_type(&left.span()),
             artifacts.get_expression_type(&right.span()),
         ),
         OtherValuePosition::Left => (
-            get_expression_id(
-                right,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
-            get_expression_id(
-                left,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            ),
+            get_assertable_expression_id(right, assertion_context),
+            get_assertable_expression_id(left, assertion_context),
             artifacts.get_expression_type(&right.span()),
             artifacts.get_expression_type(&left.span()),
         ),
@@ -2079,12 +2014,7 @@ where
         return None;
     }
 
-    get_expression_id(
-        argument_list.arguments.first()?.value(),
-        assertion_context.this_class_name,
-        assertion_context.resolved_names,
-        Some(assertion_context.codebase),
-    )
+    get_assertable_expression_id(argument_list.arguments.first()?.value(), assertion_context)
 }
 
 #[inline]

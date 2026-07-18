@@ -161,23 +161,29 @@ where
 
                 Rc::new(get_mixed())
             } else if block_context.flags.inside_variable_reference() {
-                context.collector.report_with_code(
-                    IssueCode::ReferenceToUndefinedVariable,
-                    Issue::help(format!("Reference created from a previously undefined variable `{variable_name}`.",))
-                        .with_annotation(
-                            Annotation::primary(variable_span)
-                                .with_message(format!("`{variable_name}` is created here and initialized to `null` because it's used as a reference")),
-                        )
-                        .with_note(
-                            "When a reference is taken from an undefined variable, PHP creates it with a `null` value."
-                        )
-                        .with_note(
-                            "This is often used for output parameters but can hide typos if you intended to use an existing variable."
-                        )
-                        .with_help(
-                            format!("If this is intentional, consider initializing `{variable_name}` to `null` first for code clarity. Otherwise, check for typos.")
-                        ),
-                );
+                // Passing an undefined variable to an out-style by-reference
+                // parameter (no input type, nullable, or omittable, like
+                // `preg_match`'s `$matches`) is idiomatic: the incoming `null`
+                // is an acceptable value for the callee.
+                if !block_context.flags.inside_out_parameter_reference() {
+                    context.collector.report_with_code(
+                        IssueCode::ReferenceToUndefinedVariable,
+                        Issue::help(format!("Reference created from a previously undefined variable `{variable_name}`.",))
+                            .with_annotation(
+                                Annotation::primary(variable_span)
+                                    .with_message(format!("`{variable_name}` is created here and initialized to `null` because it's used as a reference")),
+                            )
+                            .with_note(
+                                "When a reference is taken from an undefined variable, PHP creates it with a `null` value."
+                            )
+                            .with_note(
+                                "This is often used for output parameters but can hide typos if you intended to use an existing variable."
+                            )
+                            .with_help(
+                                format!("If this is intentional, consider initializing `{variable_name}` to `null` first for code clarity. Otherwise, check for typos.")
+                            ),
+                    );
+                }
 
                 // This variable does not currently exist, but is being referenced.
                 // therefore, we need to analyze it as if it was being assigned `null`.
@@ -192,7 +198,10 @@ where
                     false,
                 );
 
-                Rc::new(get_mixed())
+                // PHP creates the variable with a `null` value, so that is its
+                // type at this point (e.g. as an argument to the by-reference
+                // parameter that triggered its creation).
+                Rc::new(get_null())
             } else if block_context.flags.inside_unset() {
                 Rc::new(get_null())
             } else if block_context.flags.inside_isset() {
