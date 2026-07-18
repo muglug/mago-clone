@@ -12,6 +12,7 @@ use crate::identifier::function_like::FunctionLikeIdentifier;
 use crate::metadata::CodebaseMetadata;
 use crate::metadata::class_like::ClassLikeMetadata;
 use crate::metadata::function_like::FunctionLikeMetadata;
+use crate::misc::VariableIdentifier;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::alias::TAlias;
@@ -971,6 +972,7 @@ pub fn get_signature_of_function_like_metadata(
                 parameter_metadata.flags.is_variadic(),
                 parameter_metadata.flags.has_default(),
             )
+            .with_name(Some(VariableIdentifier(parameter_metadata.get_name().0)))
         })
         .collect();
 

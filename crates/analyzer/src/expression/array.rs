@@ -372,6 +372,33 @@ where
             array_creation_info.property_types.get(&ArrayKey::Integer(0)),
             array_creation_info.property_types.get(&ArrayKey::Integer(1)),
         )
+        && let (Some(relative_class), Some(method_name)) =
+            (first_type.get_single_literal_string_value(), second_type.get_single_literal_string_value())
+        && let Some(current_class) = block_context.scope.get_class_like()
+    {
+        let resolved_class =
+            if relative_class.eq_ignore_ascii_case(b"self") || relative_class.eq_ignore_ascii_case(b"static") {
+                Some(current_class.name)
+            } else if relative_class.eq_ignore_ascii_case(b"parent") {
+                current_class.direct_parent_class
+            } else {
+                None
+            };
+
+        if let Some(resolved_class) = resolved_class
+            && context.codebase.method_exists(resolved_class.as_bytes(), method_name)
+            && let Some((_, first_type)) = array_creation_info.property_types.get_mut(&ArrayKey::Integer(0))
+        {
+            *first_type = get_literal_string(resolved_class);
+        }
+    }
+
+    if array_creation_info.is_list
+        && array_creation_info.property_types.len() == 2
+        && let (Some((_, first_type)), Some((_, second_type))) = (
+            array_creation_info.property_types.get(&ArrayKey::Integer(0)),
+            array_creation_info.property_types.get(&ArrayKey::Integer(1)),
+        )
     {
         let class_names: Vec<_> = first_type
             .types

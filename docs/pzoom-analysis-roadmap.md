@@ -269,7 +269,9 @@ Phase 3 gate:
 - `TypeReconciliation` remains 623 passing / 62 failing, confirming the phase
   did not change unrelated conditional-flow behavior.
 
-## Phase 4: callable inference and method-result memoization
+## Phase 4: callable inference
+
+Branch: `agent/pzoom-callable-inference`
 
 Planned slices:
 
@@ -277,12 +279,84 @@ Planned slices:
    callable arrays, invokable objects, named arguments, and closure creation.
 2. Infer callable template bounds contravariantly from parameters and
    covariantly from returns, including partially applied pipelines.
-3. Infer mutation-free method bodies and memoize method-call results only when
-   dispatch is stable (private, final, or otherwise non-overridable).
+3. Infer mutation-free method bodies for purity and effect analysis only.
+   Repeated method calls remain independent evaluations unless PHP stores the
+   result in a local variable.
 4. Keep this separate from Pzoom's property-assignment retention policy.
 
-Primary baseline: 18 `Callable`, 10 `Closure`, and the non-property subset of
-33 `MethodCall` failures.
+Post-assertion baseline:
+
+- `Callable/` plus `PureCallable/`: 103 passing / 19 failing;
+- `Closure/`: 51 passing / 10 failing;
+- `Closures/`: 2 passing / 2 failing;
+- `MethodCall/`: 53 passing / 13 failing.
+
+Execution checkpoints:
+
+1. **Ownership baseline.** Freeze the four failure-name lists and separate
+   callable signature loss from PHPDoc dialect, unavailable-symbol, DOM/magic
+   member, and private-lookup failures owned by Phase 5.
+2. **Callable target normalization.** Resolve callable arrays, invokable
+   objects, `Closure::__invoke()`, class strings, `self`, and inherited
+   first-class callables into one signature representation before comparison.
+3. **Generic signature substitution.** Substitute receiver/class/function
+   templates into callable parameters and returns, preserve named parameters,
+   and infer omitted closure parameter types using contravariant inputs and
+   covariant outputs.
+4. **Higher-order composition.** Carry those specialized signatures through
+   `array_map`/filter-like callbacks, returned closures, partially applied
+   functions, and pipeline helpers without falling back to `mixed`.
+5. **Phase gate.** Add native regressions per invariant, run all callable,
+   closure, and method subsets, then the native suite and complete Pzoom corpus
+   before publishing the stacked checkpoint.
+
+Checkpoint A (callable target normalization):
+
+- retain callable parameter names through PHPDoc, expansion, partial
+  application, and `Closure::fromCallable()` so named invocation remains
+  valid after specialization;
+- normalize callable objects, direct `Closure::__invoke()`, callable arrays,
+  and leading namespace separators without discarding their signatures;
+- `Callable/` plus `PureCallable/`: 109 passing / 13 failing;
+- `Closure/`: 55 passing / 6 failing, for ten resolved target-normalization
+  cases across the two subsets with no newly failing cases.
+
+Checkpoint B (generic and contextual callable inference):
+
+- solve templates owned by first-class callable arguments from the receiving
+  callable's parameter positions before binding the outer invocation's
+  templates;
+- pass contextual callable results into nested invocations before their
+  arguments are analyzed, preserving generic filter/map/pipeline composition
+  instead of collapsing returned closures to `mixed`;
+- contextualize returned closure parameters from declared callable return
+  contracts and narrow explicitly typed inline closure parameters when the
+  actual callback input is a concrete object subtype;
+- preserve named variadic callback types, accept dynamic and relative callable
+  arrays, forward first-class callables through `call_user_func`, and infer
+  purity for syntactically side-effect-free closure expressions;
+- `Callable/` plus `PureCallable/`: 119 passing / 3 failing;
+- `Closure/`: 56 passing / 5 failing;
+- `Closures/`: 3 passing / 1 failing.
+
+Phase 4 gate:
+
+- full Pzoom corpus: 3,496 passing / 525 failing, resolving 27 of the Phase 3
+  failures with zero newly failing non-memoization cases;
+- the four ownership subsets moved from 209 passing / 44 failing to 231
+  passing / 22 failing;
+- analyzer-level memoization of repeated method-call results is deliberately
+  excluded: separate calls are separate evaluations unless the PHP code stores
+  the result in a local variable. This leaves 12 Pzoom cases unsupported by
+  design rather than making purity or dispatch stability imply value identity;
+- native analyzer suite: 2,415 passing / 0 failing; Codex: 199 passing / 0
+  failing; formatting and diff checks pass;
+- the remaining non-memoization focused residuals are assigned to Phase 5:
+  PHPDoc aliases/dialect,
+  inherited or magic member lookup, static/intersection comparison,
+  by-reference closure flow, DOM metadata, and one PHP-version availability
+  mismatch. The invalid non-static `C::method(...)` case remains an explicit
+  Mago/Pzoom behavioral divergence because PHP rejects that static access.
 
 ## Phase 5: class/member resolution and remaining control flow
 

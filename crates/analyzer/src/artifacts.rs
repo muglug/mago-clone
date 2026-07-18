@@ -39,6 +39,9 @@ pub struct AnalysisArtifacts {
     pub case_scopes: Vec<CaseScope>,
     pub fully_matched_switch_offsets: HashSet<u32>,
     pub inferred_parameter_types: Option<HashMap<usize, TUnion>>,
+    /// The type expected for the expression currently being analyzed. This is
+    /// used to seed high-order calls whose generic return is itself callable.
+    pub contextual_expression_type: Option<TUnion>,
     pub method_initialized_properties: HashMap<(Word, Word), WordSet>,
     pub method_calls_this_methods: HashMap<(Word, Word), HashSet<Word>>,
     pub method_calls_parent_constructor: HashMap<(Word, Word), bool>,
@@ -69,6 +72,7 @@ impl AnalysisArtifacts {
             loop_scope: None,
             fully_matched_switch_offsets: HashSet::default(),
             inferred_parameter_types: None,
+            contextual_expression_type: None,
             method_initialized_properties: HashMap::default(),
             method_calls_this_methods: HashMap::default(),
             method_calls_parent_constructor: HashMap::default(),

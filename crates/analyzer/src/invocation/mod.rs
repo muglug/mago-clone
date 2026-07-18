@@ -283,10 +283,13 @@ impl<'ctx> InvocationTarget<'ctx> {
 
     /// Checks if the target function/method allows named arguments.
     #[inline]
-    pub const fn allows_named_arguments(&self) -> bool {
+    pub fn allows_named_arguments(&self) -> bool {
         match self {
             InvocationTarget::FunctionLike { metadata, .. } => !metadata.flags.forbids_named_arguments(),
-            _ => false,
+            InvocationTarget::Callable { signature, .. } => {
+                !signature.parameters.is_empty()
+                    && signature.parameters.iter().all(|parameter| parameter.get_name().is_some())
+            }
         }
     }
 
@@ -387,7 +390,7 @@ impl<'ctx> InvocationTargetParameter<'ctx> {
         // Changed to &'a
         match self {
             InvocationTargetParameter::FunctionLike(metadata) => Some(metadata.get_name()),
-            InvocationTargetParameter::Callable(_) => None,
+            InvocationTargetParameter::Callable(parameter) => parameter.get_name(),
         }
     }
 

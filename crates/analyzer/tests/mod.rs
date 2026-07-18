@@ -253,6 +253,7 @@ test_case!(bin2hex);
 test_case!(break_narrowing);
 test_case!(by_reference_invalidation);
 test_case!(callable_template_inference);
+test_case!(callable_target_normalization);
 test_case!(class_like_constant_access);
 test_case!(collection_types);
 test_case!(condition_is_too_complex);

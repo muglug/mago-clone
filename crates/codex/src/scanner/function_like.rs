@@ -14,6 +14,7 @@ use mago_span::Span;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
 use mago_syntax::cst::Closure;
+use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
 use mago_syntax::cst::ForeachBody;
 use mago_syntax::cst::Function;
@@ -24,6 +25,7 @@ use mago_syntax::cst::ModifierSequenceExt;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::SwitchBody;
 use mago_syntax::cst::SwitchCase;
+use mago_syntax::cst::UnaryPrefixOperator;
 use mago_syntax::cst::Variable;
 use mago_syntax::cst::WhileBody;
 use mago_syntax::utils;
@@ -264,6 +266,10 @@ where
         flags |= MetadataFlags::BY_REFERENCE;
     }
 
+    if block_is_trivially_pure_closure(&closure.body) {
+        flags |= MetadataFlags::PURE;
+    }
+
     let synthetic_name = functionlike_id.1;
 
     let mut metadata =
@@ -324,6 +330,10 @@ where
         flags |= MetadataFlags::BY_REFERENCE;
     }
 
+    if expression_is_trivially_pure(arrow_function.expression) {
+        flags |= MetadataFlags::PURE;
+    }
+
     let synthetic_name = functionlike_id.1;
 
     let mut metadata =
@@ -353,6 +363,47 @@ where
     infer_assertions_from_expression_body(arrow_function.expression, &mut metadata, context.resolved_names);
 
     metadata
+}
+
+/// Infers purity only for closure bodies whose syntax proves they cannot
+/// observe or mutate external state. Broader purity remains annotation- or
+/// analysis-driven; this deliberately excludes calls, member access, and
+/// assignments.
+fn block_is_trivially_pure_closure(block: &Block<'_>) -> bool {
+    let [Statement::Return(return_statement)] = block.statements.as_slice() else {
+        return false;
+    };
+
+    return_statement.value.is_some_and(expression_is_trivially_pure)
+}
+
+fn expression_is_trivially_pure(expression: &Expression<'_>) -> bool {
+    match expression {
+        Expression::Literal(_)
+        | Expression::Variable(_)
+        | Expression::ConstantAccess(_)
+        | Expression::Identifier(_)
+        | Expression::MagicConstant(_) => true,
+        Expression::Parenthesized(parenthesized) => expression_is_trivially_pure(parenthesized.expression),
+        Expression::Binary(binary) => {
+            expression_is_trivially_pure(binary.lhs) && expression_is_trivially_pure(binary.rhs)
+        }
+        Expression::UnaryPrefix(unary) => {
+            !matches!(
+                &unary.operator,
+                UnaryPrefixOperator::ErrorControl(_)
+                    | UnaryPrefixOperator::Reference(_)
+                    | UnaryPrefixOperator::PreIncrement(_)
+                    | UnaryPrefixOperator::PreDecrement(_)
+            ) && expression_is_trivially_pure(unary.operand)
+        }
+        Expression::Conditional(conditional) => {
+            expression_is_trivially_pure(conditional.condition)
+                && conditional.then.is_none_or(expression_is_trivially_pure)
+                && expression_is_trivially_pure(conditional.r#else)
+        }
+        _ => false,
+    }
 }
 
 fn scan_function_like_docblock<A>(

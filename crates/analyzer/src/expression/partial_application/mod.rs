@@ -114,7 +114,8 @@ fn create_closure_from_partial_application(
                             new_param.is_by_reference(),
                             new_param.is_variadic(),
                             new_param.has_default(),
-                        );
+                        )
+                        .with_name(new_param.get_name().copied());
                     }
 
                     new_parameters.push(new_param);
@@ -139,7 +140,8 @@ fn create_closure_from_partial_application(
                             new_param.is_by_reference(),
                             new_param.is_variadic(),
                             new_param.has_default(),
-                        );
+                        )
+                        .with_name(new_param.get_name().copied());
                     }
 
                     new_parameters.push(new_param);
@@ -158,6 +160,7 @@ fn create_closure_from_partial_application(
                             true,
                             false,
                         )
+                        .with_name(last_param.get_name().copied())
                     };
 
                     if let Some(type_sig) = new_param.get_type_signature()
@@ -169,7 +172,8 @@ fn create_closure_from_partial_application(
                             new_param.is_by_reference(),
                             new_param.is_variadic(),
                             new_param.has_default(),
-                        );
+                        )
+                        .with_name(new_param.get_name().copied());
                     }
 
                     new_parameters.push(new_param);

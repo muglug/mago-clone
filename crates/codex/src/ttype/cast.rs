@@ -51,6 +51,7 @@ pub fn cast_atomic_to_callable<'atomic>(
         if let Some(idx) = memchr::memmem::find(literal_string, b"::") {
             let (class_part, rest) = literal_string.split_at(idx);
             let method_part = &rest[2..];
+            let class_part = class_part.strip_prefix(b"\\").unwrap_or(class_part);
             return Some(Cow::Owned(TCallable::Alias(FunctionLikeIdentifier::Method(
                 word(class_part),
                 word(method_part),
@@ -127,10 +128,22 @@ fn handle_array_callable(
     }
 
     let class_or_object = class_or_object.get_single();
-    let method_name = word(method.get_single_literal_string_value()?);
+    let Some(method_name) = method.get_single_literal_string_value().map(word) else {
+        let first_can_name_a_method =
+            matches!(class_or_object, TAtomic::Object(TObject::Named(_) | TObject::Enum(_) | TObject::Any))
+                || class_or_object.get_class_string_value().is_some()
+                || class_or_object.get_literal_string_value().is_some_and(|name| codebase.class_like_exists(name));
+
+        if method.is_string() && first_can_name_a_method {
+            return Some(Cow::Owned(TCallable::Signature(TCallableSignature::mixed(false))));
+        }
+
+        return None;
+    };
 
     // Check if the first element is a literal string (e.g., 'ClassName')
     if let Some(class_name) = class_or_object.get_literal_string_value() {
+        let class_name = class_name.strip_prefix(b"\\").unwrap_or(class_name);
         return Some(Cow::Owned(TCallable::Alias(FunctionLikeIdentifier::Method(word(class_name), method_name))));
     }
 

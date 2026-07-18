@@ -278,6 +278,40 @@ where
         block_context.called_methods.insert(method_name);
     }
 
+    if !is_null_safe
+        && let ClassLikeMemberSelector::Identifier(method_ident) = selector
+        && method_ident.value.eq_ignore_ascii_case(b"__invoke")
+    {
+        let mut template_result = TemplateResult::default();
+        let (invocation_targets, encountered_invalid_targets) =
+            super::function_call::resolve_targets(context, block_context, artifacts, object, &mut template_result)?;
+
+        if !invocation_targets.is_empty() || encountered_invalid_targets {
+            let this_variable = get_expression_id(
+                object,
+                block_context.scope.get_class_like_name(),
+                context.resolved_names,
+                Some(context.codebase),
+            );
+
+            return analyze_invocation_targets(
+                context,
+                block_context,
+                artifacts,
+                template_result,
+                invocation_targets,
+                InvocationArgumentsSource::ArgumentList(argument_list),
+                span,
+                this_variable.as_ref().map(|word| word.as_bytes()),
+                encountered_invalid_targets,
+                false,
+                false,
+                false,
+                false,
+            );
+        }
+    }
+
     let method_resolution =
         resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
 
