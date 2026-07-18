@@ -42,6 +42,8 @@ use crate::ttype::atomic::scalar::int::TInteger;
 use crate::ttype::atomic::scalar::string::TString;
 use crate::ttype::atomic::scalar::string::TStringLiteral;
 use crate::ttype::combiner;
+use crate::ttype::template::TemplateResult;
+use crate::ttype::template::inferred_type_replacer;
 use crate::ttype::union::TUnion;
 
 thread_local! {
@@ -309,8 +311,14 @@ pub(crate) fn expand_atomic(
         TAtomic::Conditional(conditional) => {
             *skip_key = true;
 
-            let mut then = (*conditional.then).clone();
-            let mut otherwise = (*conditional.otherwise).clone();
+            let mut then =
+                expand_unresolved_conditional_branch(&conditional.then, conditional, !conditional.negated, codebase);
+            let mut otherwise = expand_unresolved_conditional_branch(
+                &conditional.otherwise,
+                conditional,
+                conditional.negated,
+                codebase,
+            );
 
             expand_union(codebase, &mut then, options);
             expand_union(codebase, &mut otherwise, options);
@@ -362,6 +370,28 @@ pub(crate) fn expand_atomic(
         }
         _ => {}
     }
+}
+
+/// Builds a conservative declaration-time branch envelope for an unresolved
+/// template conditional. The matching arm may safely substitute the tested
+/// target for the subject; the non-matching arm retains the full declared
+/// constraint because the type system does not represent arbitrary type
+/// subtraction. Invocation-time evaluation remains more precise.
+fn expand_unresolved_conditional_branch(
+    branch: &TUnion,
+    conditional: &crate::ttype::atomic::conditional::TConditional,
+    subject_matches_target: bool,
+    codebase: &CodebaseMetadata,
+) -> TUnion {
+    let TAtomic::GenericParameter(subject) = conditional.subject.get_single() else {
+        return branch.clone();
+    };
+
+    let bound = if subject_matches_target { (*conditional.target).clone() } else { (*subject.constraint).clone() };
+    let mut template_result = TemplateResult::default();
+    template_result.add_lower_bound(subject.parameter_name, subject.defining_entity, bound);
+
+    inferred_type_replacer::replace(branch, &template_result, codebase)
 }
 
 /// Resolves a `ClassLikeConstant` array key to its concrete `Integer` or `String` value.

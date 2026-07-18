@@ -485,7 +485,7 @@ pub fn get_union_from_type(
             TUnion::from_single(Cow::Owned(TAtomic::Scalar(TScalar::Integer(TInteger::from_bounds(min, max)))))
         }
         Type::Conditional(conditional) => TUnion::from_single(Cow::Owned(TAtomic::Conditional(TConditional::new(
-            Arc::new(get_union_from_type(conditional.subject, scope, type_context, classname)?),
+            Arc::new(get_conditional_subject_type(conditional.subject, scope, type_context, classname)?),
             Arc::new(get_union_from_type(conditional.target, scope, type_context, classname)?),
             Arc::new(get_union_from_type(conditional.then, scope, type_context, classname)?),
             Arc::new(get_union_from_type(conditional.r#else, scope, type_context, classname)?),
@@ -497,6 +497,8 @@ pub fn get_union_from_type(
         Type::Variable(variable) => {
             if variable.value == b"$this" {
                 TUnion::from_single(Cow::Owned(TAtomic::Object(TObject::Named(TNamedObject::new_this(word("$this"))))))
+            } else if let Some(defining_entities) = type_context.get_template_definition(word(variable.value)) {
+                wrap_atomic(get_template_atomic(defining_entities, word(variable.value)))
             } else {
                 TUnion::from_single(Cow::Owned(TAtomic::Variable(word(variable.value))))
             }
@@ -586,6 +588,37 @@ pub fn get_union_from_type(
             return Err(TypeError::UnsupportedType(ttype.to_string(), ttype.span()));
         }
     })
+}
+
+fn get_conditional_subject_type(
+    subject: &Type<'_>,
+    scope: &NamespaceScope,
+    type_context: &TypeResolutionContext,
+    classname: Option<Word>,
+) -> Result<TUnion, TypeError> {
+    if let Type::Reference(reference) = subject
+        && let ReferenceKind::Identifier(identifier) = &reference.kind
+    {
+        if reference.call.is_some() && identifier.value.eq_ignore_ascii_case(b"func_num_args") {
+            if let Some(defining_entities) = type_context.get_template_definition(word("TFunctionArgCount")) {
+                return Ok(wrap_atomic(get_template_atomic(defining_entities, word("TFunctionArgCount"))));
+            }
+
+            return Ok(TUnion::from_atomic(TAtomic::Variable(word("TFunctionArgCount"))));
+        }
+
+        if identifier.value.eq_ignore_ascii_case(b"PHP_VERSION_ID")
+            || identifier.value.eq_ignore_ascii_case(b"PHP_MAJOR_VERSION")
+        {
+            if let Some(defining_entities) = type_context.get_template_definition(word(identifier.value)) {
+                return Ok(wrap_atomic(get_template_atomic(defining_entities, word(identifier.value))));
+            }
+
+            return Ok(TUnion::from_atomic(TAtomic::Variable(word(identifier.value))));
+        }
+    }
+
+    get_union_from_type(subject, scope, type_context, classname)
 }
 
 #[inline]

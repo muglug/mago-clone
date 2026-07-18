@@ -388,6 +388,15 @@ mod tests {
         assert!(matches!(parse(&arena, b"T is ?int ? string : float"), Type::Conditional(_)));
         assert!(matches!(parse(&arena, b"T is int|string ? array : bool"), Type::Conditional(_)));
         assert!(matches!(parse(&arena, b"T is array<int, string> ? A : B"), Type::Conditional(_)));
+
+        let Type::Conditional(conditional) = parse(&arena, b"func_num_args() is 0 ? false : string") else {
+            panic!("expected a conditional type");
+        };
+        let Type::Reference(subject) = conditional.subject else {
+            panic!("expected a semantic function-call subject");
+        };
+        assert!(subject.call.is_some());
+        assert_eq!(conditional.to_string(), "func_num_args() is 0 ? false : string");
     }
 
     #[test]

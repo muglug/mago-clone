@@ -19,7 +19,24 @@ pub enum ReferenceKind<'arena> {
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ReferenceType<'arena> {
     pub kind: ReferenceKind<'arena>,
+    /// An empty call suffix used by semantic conditional subjects such as
+    /// `func_num_args()`. PHPDoc does not otherwise allow function calls in a
+    /// type expression.
+    pub call: Option<EmptyCall>,
     pub parameters: Option<GenericParameters<'arena>>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct EmptyCall {
+    pub left_parenthesis: Span,
+    pub right_parenthesis: Span,
+}
+
+impl HasSpan for EmptyCall {
+    fn span(&self) -> Span {
+        self.left_parenthesis.join(self.right_parenthesis)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -65,9 +82,10 @@ impl HasSpan for ReferenceKind<'_> {
 
 impl HasSpan for ReferenceType<'_> {
     fn span(&self) -> Span {
-        match &self.parameters {
-            Some(parameters) => self.kind.span().join(parameters.span()),
-            None => self.kind.span(),
+        match (&self.call, &self.parameters) {
+            (Some(call), _) => self.kind.span().join(call.span()),
+            (None, Some(parameters)) => self.kind.span().join(parameters.span()),
+            (None, None) => self.kind.span(),
         }
     }
 }
@@ -117,7 +135,9 @@ impl std::fmt::Display for ReferenceKind<'_> {
 
 impl std::fmt::Display for ReferenceType<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(parameters) = &self.parameters {
+        if self.call.is_some() {
+            write!(f, "{}()", self.kind)
+        } else if let Some(parameters) = &self.parameters {
             write!(f, "{}{}", self.kind, parameters)
         } else {
             write!(f, "{}", self.kind)

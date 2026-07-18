@@ -3,16 +3,18 @@ use std::borrow::Cow;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::misc::GenericParent;
-use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::conditional::TConditional;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
+use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::get_literal_int;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateBound;
 use mago_codex::ttype::template::TemplateResult;
@@ -36,6 +38,35 @@ where
     A: Arena,
 {
     let mut template_result = Cow::Borrowed(template_result);
+
+    if let Some(method_templates) = invocation.target.get_template_types() {
+        for (template_name, template) in method_templates {
+            let replacement = if template_name.as_bytes().eq_ignore_ascii_case(b"TFunctionArgCount") {
+                Some(get_literal_int(invocation.arguments_source.argument_count() as i64))
+            } else if template_name.as_bytes().eq_ignore_ascii_case(b"PHP_MAJOR_VERSION") {
+                Some(get_literal_int(i64::from(context.settings.version.major())))
+            } else if template_name.as_bytes().eq_ignore_ascii_case(b"PHP_VERSION_ID") {
+                let version = context.settings.version;
+                Some(get_literal_int(i64::from(version.major() * 10_000 + version.minor() * 100 + version.patch())))
+            } else if template_name.as_bytes().starts_with(b"$") {
+                parameters.get(template_name).cloned()
+            } else {
+                None
+            };
+
+            if let Some(replacement) = replacement {
+                // These are call-context facts, not accumulated inference.
+                // Replace any earlier never/default placeholder with the exact
+                // value supplied by this invocation.
+                template_result
+                    .to_mut()
+                    .lower_bounds
+                    .entry(*template_name)
+                    .or_default()
+                    .insert(template.defining_entity, vec![TemplateBound::new(replacement, 0, None, None)]);
+            }
+        }
+    }
 
     'populate_templates: {
         if let Some(function_like_identifier) = invocation.target.get_function_like_identifier() {
@@ -210,6 +241,21 @@ where
     A: Arena,
 {
     if let TAtomic::Variable(variable) = atomic_to_resolve {
+        if variable.as_bytes().eq_ignore_ascii_case(b"PHP_VERSION_ID") {
+            let version = context.settings.version;
+            let php_version_id = version.major() * 10_000 + version.minor() * 100 + version.patch();
+
+            return get_literal_int(i64::from(php_version_id)).types.into_owned();
+        }
+
+        if variable.as_bytes().eq_ignore_ascii_case(b"PHP_MAJOR_VERSION") {
+            return get_literal_int(i64::from(context.settings.version.major())).types.into_owned();
+        }
+
+        if variable.as_bytes().eq_ignore_ascii_case(b"TFunctionArgCount") {
+            return get_literal_int(invocation.arguments_source.argument_count() as i64).types.into_owned();
+        }
+
         if variable.as_bytes().eq_ignore_ascii_case(b"$this")
             && let Some(method_context) = invocation.target.get_method_context()
             && let StaticClassType::Object(this_type) = &method_context.class_type
@@ -229,21 +275,52 @@ where
         return vec![atomic_to_resolve];
     };
 
+    resolve_conditional(context, invocation, template_result, parameters, conditional)
+}
+
+#[derive(Clone, Copy)]
+enum ConditionalSubject {
+    Parameter(mago_word::Word),
+}
+
+fn resolve_conditional<'ctx, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    conditional: TConditional,
+) -> Vec<TAtomic>
+where
+    A: Arena,
+{
+    // Declared template subjects are handled recursively by Codex's inferred
+    // template replacer. Invocation-only subjects still resolve here because
+    // their values come from arguments or analyzer configuration.
+    if matches!(conditional.subject.get_single(), TAtomic::GenericParameter(_)) {
+        return vec![TAtomic::Conditional(conditional)];
+    }
+
+    let conditional_subject = match conditional.subject.get_single() {
+        TAtomic::Variable(parameter_name) => Some(ConditionalSubject::Parameter(*parameter_name)),
+        _ => None,
+    };
+
     let subject = resolve_union(context, invocation, template_result, parameters, (*conditional.subject).clone());
     let target = resolve_union(context, invocation, template_result, parameters, (*conditional.target).clone());
-    let then_type = resolve_union(context, invocation, template_result, parameters, (*conditional.then).clone());
-    let otherwise_type =
-        resolve_union(context, invocation, template_result, parameters, (*conditional.otherwise).clone());
-    let negated = conditional.negated;
 
     let subject = inferred_type_replacer::replace(&subject, template_result, context.codebase);
     let target = inferred_type_replacer::replace(&target, template_result, context.codebase);
 
-    if !subject.is_never() {
+    let mut matching_types = Vec::new();
+    let mut non_matching_types = Vec::new();
+    let mut has_undecidable_type = subject.is_never();
+
+    for candidate_atomic in subject.types.as_ref() {
+        let candidate = TUnion::from_atomic(candidate_atomic.clone());
         let mut comparison_result = ComparisonResult::new();
-        let subject_is_contained = union_comparator::is_contained_by(
+        let candidate_is_contained = union_comparator::is_contained_by(
             context.codebase,
-            &subject,
+            &candidate,
             &target,
             false,
             false,
@@ -251,9 +328,9 @@ where
             &mut comparison_result,
         );
 
-        let are_int_float_disjoint = if target.is_single() && subject.is_single() {
+        let are_int_float_disjoint = if target.is_single() && candidate.is_single() {
             matches!(
-                (subject.effective_int_or_float(), target.effective_int_or_float()),
+                (candidate.effective_int_or_float(), target.effective_int_or_float()),
                 (Some(true), Some(false)) | (Some(false), Some(true))
             )
         } else {
@@ -261,16 +338,95 @@ where
         };
 
         let are_disjoint = are_int_float_disjoint
-            || !union_comparator::can_expression_types_be_identical(context.codebase, &subject, &target, false, false);
+            || !union_comparator::can_expression_types_be_identical(
+                context.codebase,
+                &candidate,
+                &target,
+                false,
+                false,
+            );
 
-        if are_disjoint {
-            return if negated { then_type.types.into_owned() } else { otherwise_type.types.into_owned() };
-        }
-
-        if subject_is_contained {
-            return if negated { otherwise_type.types.into_owned() } else { then_type.types.into_owned() };
+        if candidate_is_contained {
+            matching_types.push(candidate_atomic.clone());
+        } else if are_disjoint {
+            non_matching_types.push(candidate_atomic.clone());
+        } else {
+            has_undecidable_type = true;
         }
     }
 
-    add_union_type(then_type, &otherwise_type, context.codebase, CombinerOptions::default()).types.into_owned()
+    let mut resolved_types = Vec::new();
+
+    if !matching_types.is_empty() {
+        let branch = if conditional.negated { &conditional.otherwise } else { &conditional.then };
+        resolved_types.extend(
+            resolve_conditional_branch(
+                context,
+                invocation,
+                template_result,
+                parameters,
+                conditional_subject,
+                TUnion::from_vec(matching_types),
+                branch,
+            )
+            .types
+            .into_owned(),
+        );
+    }
+
+    if !non_matching_types.is_empty() {
+        let branch = if conditional.negated { &conditional.then } else { &conditional.otherwise };
+        resolved_types.extend(
+            resolve_conditional_branch(
+                context,
+                invocation,
+                template_result,
+                parameters,
+                conditional_subject,
+                TUnion::from_vec(non_matching_types),
+                branch,
+            )
+            .types
+            .into_owned(),
+        );
+    }
+
+    if has_undecidable_type || resolved_types.is_empty() {
+        resolved_types.extend(
+            resolve_union(context, invocation, template_result, parameters, (*conditional.then).clone())
+                .types
+                .into_owned(),
+        );
+        resolved_types.extend(
+            resolve_union(context, invocation, template_result, parameters, (*conditional.otherwise).clone())
+                .types
+                .into_owned(),
+        );
+    }
+
+    combiner::combine(resolved_types, context.codebase, CombinerOptions::default())
+}
+
+fn resolve_conditional_branch<'ctx, 'arena, A>(
+    context: &Context<'ctx, 'arena, A>,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    subject: Option<ConditionalSubject>,
+    refined_subject_type: TUnion,
+    branch: &TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    let mut refined_parameters = Cow::Borrowed(parameters);
+
+    match subject {
+        Some(ConditionalSubject::Parameter(parameter_name)) => {
+            refined_parameters.to_mut().insert(parameter_name, refined_subject_type);
+        }
+        None => {}
+    }
+
+    resolve_union(context, invocation, template_result, &refined_parameters, branch.clone())
 }
