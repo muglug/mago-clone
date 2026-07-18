@@ -81,10 +81,7 @@ impl FunctionReturnTypeProvider for ArrayFilterProvider {
             let assertions = callback_metadata.if_true_assertions.get(&param_name)?.clone();
 
             return filter_arrays(array_type, codebase, |value_type| {
-                let mut narrowed = value_type;
-                for assertion in &assertions {
-                    narrowed = apply_assertion_to_narrow_type(narrowed, assertion, codebase);
-                }
+                let narrowed = apply_assertion_set_to_narrow_type(value_type, &assertions, codebase);
                 if narrowed.types.is_empty() { FilterOutcome::Removed } else { FilterOutcome::KeptAsOptional(narrowed) }
             });
         }
@@ -308,4 +305,29 @@ pub(super) fn apply_assertion_to_narrow_type(
         }
         _ => original_type,
     }
+}
+
+pub(super) fn apply_assertion_set_to_narrow_type(
+    mut original_type: TUnion,
+    assertions: &[Vec<Assertion>],
+    codebase: &CodebaseMetadata,
+) -> TUnion {
+    for clause in assertions {
+        let clause_input = original_type.clone();
+        let mut clause_result = None;
+
+        for assertion in clause {
+            let narrowed = apply_assertion_to_narrow_type(clause_input.clone(), assertion, codebase);
+            clause_result = Some(match clause_result {
+                Some(existing) => add_union_type(existing, &narrowed, codebase, CombinerOptions::default()),
+                None => narrowed,
+            });
+        }
+
+        if let Some(clause_result) = clause_result {
+            original_type = clause_result;
+        }
+    }
+
+    original_type
 }

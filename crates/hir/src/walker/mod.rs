@@ -1803,6 +1803,10 @@ generate_walker! {
                 walker.walk_direct_variable(variable, context);
                 walker.walk_name(name, context);
             }
+            AssertAnnotationTargetKind::StaticProperty(class, property) => {
+                walker.walk_name(class, context);
+                walker.walk_direct_variable(property, context);
+            }
         }
     }
 

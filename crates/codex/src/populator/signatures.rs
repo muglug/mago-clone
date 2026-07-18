@@ -157,43 +157,49 @@ pub fn populate_function_like_metadata(
     }
 
     for assertions in metadata.assertions.values_mut() {
-        for assertion in assertions {
-            if let Some(assertion_type) = assertion.get_type_mut() {
-                populate_atomic_type(
-                    assertion_type,
-                    codebase_symbols,
-                    Some(reference_source),
-                    symbol_references,
-                    force_type_population,
-                );
+        for clause in assertions {
+            for assertion in clause {
+                if let Some(assertion_type) = assertion.get_type_mut() {
+                    populate_atomic_type(
+                        assertion_type,
+                        codebase_symbols,
+                        Some(reference_source),
+                        symbol_references,
+                        force_type_population,
+                    );
+                }
             }
         }
     }
 
     for assertions in metadata.if_true_assertions.values_mut() {
-        for assertion in assertions {
-            if let Some(assertion_type) = assertion.get_type_mut() {
-                populate_atomic_type(
-                    assertion_type,
-                    codebase_symbols,
-                    Some(reference_source),
-                    symbol_references,
-                    force_type_population,
-                );
+        for clause in assertions {
+            for assertion in clause {
+                if let Some(assertion_type) = assertion.get_type_mut() {
+                    populate_atomic_type(
+                        assertion_type,
+                        codebase_symbols,
+                        Some(reference_source),
+                        symbol_references,
+                        force_type_population,
+                    );
+                }
             }
         }
     }
 
     for assertions in metadata.if_false_assertions.values_mut() {
-        for assertion in assertions {
-            if let Some(assertion_type) = assertion.get_type_mut() {
-                populate_atomic_type(
-                    assertion_type,
-                    codebase_symbols,
-                    Some(reference_source),
-                    symbol_references,
-                    force_type_population,
-                );
+        for clause in assertions {
+            for assertion in clause {
+                if let Some(assertion_type) = assertion.get_type_mut() {
+                    populate_atomic_type(
+                        assertion_type,
+                        codebase_symbols,
+                        Some(reference_source),
+                        symbol_references,
+                        force_type_population,
+                    );
+                }
             }
         }
     }

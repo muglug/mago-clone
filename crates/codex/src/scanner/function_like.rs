@@ -820,8 +820,8 @@ fn scan_function_like_docblock<A>(
             _ => &mut metadata.assertions,
         };
 
-        for assertion in assertions {
-            bucket.entry(assertion_subject).or_default().push(assertion);
+        if !assertions.is_empty() {
+            bucket.entry(assertion_subject).or_default().push(assertions);
         }
     }
 

@@ -172,7 +172,10 @@ Planned slices:
 4. Apply the same assertion pipeline to `array_key_exists`, chained `isset`,
    `empty`, `ctype_*` ranges, and union/intersection refinements.
 
-Primary baselines: 39 `AssertAnnotation` and 63 `TypeReconciliation` failures.
+Primary baselines: 39 `AssertAnnotation` and 62 `TypeReconciliation` failures.
+
+Post-provider baseline: 64 passing / 39 failing in `AssertAnnotation`, and
+623 passing / 62 failing in `TypeReconciliation`.
 
 Execution checkpoints:
 
@@ -197,6 +200,74 @@ Execution checkpoints:
 6. **Assertion gate.** Add one native regression per generalized invariant,
    run the complete analyzer suite and 4,021-case corpus, and publish a stacked
    checkpoint before callable inference begins.
+
+Checkpoint A (access-path subject mapping):
+
+- match assertion subjects to their root parameter, then append property,
+  method, static, or array-access suffixes to the actual argument expression;
+- canonicalize mapped method-call segments before they enter the formula and
+  reconciliation pipeline;
+- `AssertAnnotation`: 74 passing / 29 failing, resolving 10 cases with no new
+  failures;
+- covered behaviors: nested and magic properties, true/false/unconditional
+  contracts, immutable roots, and reference aliases.
+
+Checkpoint B (canonical clause boundaries):
+
+- store function-like contracts as CNF assertion sets instead of flattening
+  every tag and union member into one vector;
+- preserve union members as one OR clause while treating separate assertion
+  tags as independent AND clauses through scanning, inheritance, template
+  substitution, plugins, and callback providers;
+- `AssertAnnotation`: 75 passing / 28 failing, resolving the multiple-contract
+  case without regressing Checkpoint A.
+
+Checkpoint C (references and method-result keys):
+
+- propagate plain-variable reconciliation through the complete PHP reference
+  graph in either direction;
+- use canonical lowercase method identifiers for active assertion contracts,
+  matching mapped `->method()` access paths;
+- `AssertAnnotation`: 78 passing / 25 failing, resolving both direct-reference
+  cases and nested method-result narrowing. The post-dominator variant after an
+  early return remains a Phase 5 control-flow join rather than an assertion-key
+  defect.
+
+Checkpoint D (static-property subjects):
+
+- represent `self::$property`, `static::$property`, and named-class static
+  properties explicitly in the PHPDoc CST/HIR instead of rejecting them as
+  malformed parameter subjects;
+- lower and scan the target into the same canonical access-path contract model,
+  resolving lexical/late-bound class subjects at the invocation boundary;
+- `AssertAnnotation`: 84 passing / 19 failing, resolving all six static and
+  inherited-static cases.
+
+Checkpoint E (inferred and structurally reconciled contracts):
+
+- infer unconditional postconditions from `if (condition) { throw/return; }`
+  guards without alternate branches, because normal completion proves the
+  condition false;
+- compose the sound sides of boolean AND/OR predicates so a normal return can
+  retain multiple interface requirements as independent clauses;
+- cover null exclusion, namespaced classes, class methods, and single/multiple
+  interface intersections;
+- merge sequential keyed-array shape assertions, preserve list element types
+  when asserting non-emptiness, and push iterable value assertions back through
+  concrete traversable template mappings;
+- `AssertAnnotation`: 92 passing / 11 failing. The remaining failures belong to
+  standalone `@var` handling, derived enum/class templates, post-dominator
+  control flow, plus one deliberate Mago diagnostic for invoking a contract
+  whose unconditional assertion contradicts the argument type.
+
+Phase 3 gate:
+
+- full Pzoom corpus: 3,469 passing / 552 failing, resolving 28 of the Phase 2
+  failures with zero newly failing cases;
+- native analyzer suite: 2,414 passing / 0 failing;
+- Codex, PHPDoc syntax, HIR, formatting, and diff checks pass;
+- `TypeReconciliation` remains 623 passing / 62 failing, confirming the phase
+  did not change unrelated conditional-flow behavior.
 
 ## Phase 4: callable inference and method-result memoization
 

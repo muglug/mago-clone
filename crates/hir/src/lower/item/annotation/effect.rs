@@ -44,6 +44,13 @@ where
                 span: parameter.span,
                 kind: AssertAnnotationTargetKind::Property(self.phpdoc_variable(parameter), self.phpdoc_name(property)),
             },
+            AssertSubject::StaticProperty { class, property, .. } => AssertAnnotationTarget {
+                span: class.span.join(property.span),
+                kind: AssertAnnotationTargetKind::StaticProperty(
+                    self.phpdoc_name(class),
+                    self.phpdoc_variable(property),
+                ),
+            },
         };
 
         AssertAnnotation {

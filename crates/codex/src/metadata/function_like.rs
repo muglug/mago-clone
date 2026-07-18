@@ -135,15 +135,15 @@ pub struct FunctionLikeMetadata {
     /// Assertions about parameter types or variable types that are guaranteed to be true
     /// *after* this function/method returns normally. From `@psalm-assert`, `@phpstan-assert`, etc.
     /// Maps variable/parameter name to a list of type assertions.
-    pub assertions: BTreeMap<Word, Vec<Assertion>>,
+    pub assertions: BTreeMap<Word, Vec<Vec<Assertion>>>,
 
     /// Assertions about parameter/variable types that are guaranteed to be true if this
     /// function/method returns `true`. From `@psalm-assert-if-true`, etc.
-    pub if_true_assertions: BTreeMap<Word, Vec<Assertion>>,
+    pub if_true_assertions: BTreeMap<Word, Vec<Vec<Assertion>>>,
 
     /// Assertions about parameter/variable types that are guaranteed to be true if this
     /// function/method returns `false`. From `@psalm-assert-if-false`, etc.
-    pub if_false_assertions: BTreeMap<Word, Vec<Assertion>>,
+    pub if_false_assertions: BTreeMap<Word, Vec<Vec<Assertion>>>,
 
     /// Set when the assertions in `if_true_assertions` / `if_false_assertions` were
     /// auto-inferred from the body rather than declared explicitly via docblock. The
