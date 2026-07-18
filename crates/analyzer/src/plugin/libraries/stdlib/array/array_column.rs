@@ -12,6 +12,7 @@ use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::get_array_parameters;
+use mago_codex::ttype::get_arraykey;
 use mago_codex::ttype::union::TUnion;
 use mago_word::concat_word;
 use mago_word::word;
@@ -63,13 +64,30 @@ impl FunctionReturnTypeProvider for ArrayColumnProvider {
 
         let index_key_argument = invocation.get_argument(2, &[b"index_key"]);
         let index_key_type = index_key_argument.and_then(|arg| context.get_expression_type(arg));
+        let input_non_empty = array.is_non_empty();
 
-        if let Some(result) = try_resolve_from_named_object(&element_type, column_key_type, index_key_type, codebase) {
+        if let Some(result) =
+            try_resolve_from_named_object(&element_type, column_key_type, index_key_type, input_non_empty, codebase)
+        {
             return Some(result);
         }
 
-        if let Some(result) = try_resolve_from_keyed_array(&element_type, column_key_type, index_key_type) {
+        if let Some(result) =
+            try_resolve_from_object_shape(&element_type, column_key_type, index_key_type, input_non_empty)
+        {
             return Some(result);
+        }
+
+        if let Some(result) =
+            try_resolve_from_keyed_array(&element_type, column_key_type, index_key_type, input_non_empty)
+        {
+            return Some(result);
+        }
+
+        if column_key_type.is_null()
+            && element_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_) | TAtomic::Object(_)))
+        {
+            return Some(build_result(element_type, None, has_index_key(index_key_type), input_non_empty));
         }
 
         None
@@ -82,6 +100,7 @@ fn try_resolve_from_named_object(
     element_type: &TUnion,
     column_key_type: &TUnion,
     index_key_type: Option<&TUnion>,
+    input_non_empty: bool,
     codebase: &mago_codex::metadata::CodebaseMetadata,
 ) -> Option<TUnion> {
     let obj = element_type.get_single_named_object()?;
@@ -97,7 +116,41 @@ fn try_resolve_from_named_object(
 
     let index_type = resolve_index_type_from_property(index_key_type, class_like);
 
-    Some(build_result(column_type, index_type))
+    Some(build_result(column_type, index_type, has_index_key(index_key_type), input_non_empty))
+}
+
+fn try_resolve_from_object_shape(
+    element_type: &TUnion,
+    column_key_type: &TUnion,
+    index_key_type: Option<&TUnion>,
+    input_non_empty: bool,
+) -> Option<TUnion> {
+    if !element_type.is_single() {
+        return None;
+    }
+
+    let TAtomic::Object(TObject::WithProperties(object)) = element_type.get_single() else {
+        return None;
+    };
+
+    let column_type = if column_key_type.is_null() {
+        element_type.clone()
+    } else {
+        let key = word(column_key_type.get_single_literal_string_value()?);
+        let (optional, value_type) = object.known_properties.get(&key)?;
+        if *optional {
+            return None;
+        }
+        value_type.clone()
+    };
+
+    let index_type = index_key_type.and_then(|index_key_type| {
+        let key = word(index_key_type.get_single_literal_string_value()?);
+        let (_, value_type) = object.known_properties.get(&key)?;
+        extract_scalar_for_key(value_type)
+    });
+
+    Some(build_result(column_type, index_type, has_index_key(index_key_type), input_non_empty))
 }
 
 /// Resolve column and index types from a keyed-array element type by looking
@@ -106,6 +159,7 @@ fn try_resolve_from_keyed_array(
     element_type: &TUnion,
     column_key_type: &TUnion,
     index_key_type: Option<&TUnion>,
+    input_non_empty: bool,
 ) -> Option<TUnion> {
     if !element_type.is_single() {
         return None;
@@ -137,7 +191,7 @@ fn try_resolve_from_keyed_array(
         None
     };
 
-    Some(build_result(column_type, index_type))
+    Some(build_result(column_type, index_type, has_index_key(index_key_type), input_non_empty))
 }
 
 /// Try to extract the key scalar type from a value type (for use as array index).
@@ -170,16 +224,27 @@ fn resolve_index_type_from_property<'meta>(
     extract_scalar_for_key(prop_type)
 }
 
-fn build_result(column_type: TUnion, index_type: Option<&TScalar>) -> TUnion {
-    if let Some(index_scalar) = index_type {
+fn has_index_key(index_key_type: Option<&TUnion>) -> bool {
+    index_key_type.is_some_and(|index_key_type| !index_key_type.is_null())
+}
+
+fn build_result(column_type: TUnion, index_type: Option<&TScalar>, has_index_key: bool, non_empty: bool) -> TUnion {
+    if has_index_key {
         let keyed_array = TKeyedArray::new_with_parameters(
-            Arc::new(TUnion::from_atomic(TAtomic::Scalar(index_scalar.clone()))),
+            Arc::new(
+                index_type
+                    .map(|scalar| TUnion::from_atomic(TAtomic::Scalar(scalar.clone())))
+                    .unwrap_or_else(get_arraykey),
+            ),
             Arc::new(column_type),
         );
+        let mut keyed_array = keyed_array;
+        keyed_array.non_empty = non_empty;
 
         TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed_array)))
     } else {
-        let list = TList::new(Arc::new(column_type));
+        let mut list = TList::new(Arc::new(column_type));
+        list.non_empty = non_empty;
 
         TUnion::from_single(Cow::Owned(TAtomic::Array(TArray::List(list))))
     }

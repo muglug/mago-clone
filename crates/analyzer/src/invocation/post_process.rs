@@ -2,6 +2,7 @@ use mago_allocator::Arena;
 use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
@@ -15,12 +16,18 @@ use mago_algebra::saturate_clauses;
 use mago_codex::assertion::Assertion;
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::bool::TBool;
+use mago_codex::ttype::combine_union_types;
+use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::comparator::union_comparator::is_contained_by;
+use mago_codex::ttype::get_iterable_parameters;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::template::TemplateResult;
@@ -330,6 +337,15 @@ where
                     resolve_invocation_type(context, invocation, template_result, parameters, new_type)
                 });
 
+            if parameter_offset == 0
+                && let Some(argument_id) = &argument_id
+                && let Some(existing_type) = block_context.locals.get(argument_id)
+                && let Some(specialized) =
+                    specialize_array_mutation(context.codebase, artifacts, invocation, existing_type)
+            {
+                new_type = specialized;
+            }
+
             // If the argument's current type is `never`, this call is unreachable
             // its by-reference effect cannot happen, so the variable's type must
             // remain `never`. Without this guard, calling a template-generic
@@ -409,6 +425,205 @@ where
     }
 
     Ok(())
+}
+
+fn specialize_array_mutation(
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+    artifacts: &AnalysisArtifacts,
+    invocation: &Invocation<'_, '_, '_>,
+    existing_type: &TUnion,
+) -> Option<TUnion> {
+    let FunctionLikeIdentifier::Function(function_name) = invocation.target.get_function_like_identifier()? else {
+        return None;
+    };
+    let function_name = function_name.as_bytes();
+
+    if matches!(
+        function_name,
+        b"array_walk_recursive"
+            | b"asort"
+            | b"arsort"
+            | b"ksort"
+            | b"krsort"
+            | b"natcasesort"
+            | b"natsort"
+            | b"uasort"
+            | b"uksort"
+    ) {
+        return Some(existing_type.clone());
+    }
+
+    if function_name == b"array_shift" || function_name == b"array_pop" {
+        return mutate_shift_or_pop(existing_type, function_name == b"array_shift", codebase);
+    }
+
+    if function_name == b"array_unshift" || function_name == b"array_push" {
+        let inserted_types = invocation.arguments_source.get_arguments().into_iter().skip(1).filter_map(|argument| {
+            let argument_type = artifacts.get_expression_type(argument.value()?)?;
+            if argument.is_unpacked() {
+                get_iterable_parameters(argument_type.get_single(), codebase).map(|(_, value)| value)
+            } else {
+                Some(argument_type.clone())
+            }
+        });
+        let mut inserted_type = None;
+        for argument_type in inserted_types {
+            inserted_type = Some(match inserted_type {
+                Some(existing) => combine_union_types(&existing, &argument_type, codebase, CombinerOptions::default()),
+                None => argument_type.clone(),
+            });
+        }
+
+        return mutate_push_or_unshift(existing_type, inserted_type?, function_name == b"array_unshift", codebase);
+    }
+
+    None
+}
+
+fn mutate_shift_or_pop(
+    existing_type: &TUnion,
+    is_shift: bool,
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+) -> Option<TUnion> {
+    let mut result = None;
+    for atomic in existing_type.types.as_ref() {
+        let TAtomic::Array(array) = atomic else {
+            return None;
+        };
+        let is_closed_singleton_list =
+            matches!(array, TArray::List(list) if list.known_count == Some(1) && list.element_type.is_never());
+        if is_closed_singleton_list && existing_type.types.len() > 1 {
+            continue;
+        }
+        let mutated = match array {
+            TArray::List(list) => TAtomic::Array(TArray::List(remove_list_element(list, is_shift))),
+            TArray::Keyed(keyed) => {
+                let mut keyed = keyed.clone();
+                if let Some(items) = keyed.known_items.as_mut()
+                    && !items.is_empty()
+                {
+                    let key = if is_shift {
+                        items.first_key_value().map(|(key, _)| *key)
+                    } else {
+                        items.last_key_value().map(|(key, _)| *key)
+                    };
+                    if let Some(key) = key {
+                        items.remove(&key);
+                    }
+                }
+                keyed.non_empty = false;
+                TAtomic::Array(TArray::Keyed(keyed))
+            }
+        };
+        let mutated = TUnion::from_atomic(mutated);
+        result = Some(match result {
+            Some(existing) => add_union_type(existing, &mutated, codebase, CombinerOptions::default()),
+            None => mutated,
+        });
+    }
+
+    result
+}
+
+fn remove_list_element(list: &TList, is_shift: bool) -> TList {
+    let mut result = list.clone();
+    let mut removed_type = None;
+    if let Some(elements) = result.known_elements.as_mut()
+        && !elements.is_empty()
+    {
+        let key = if is_shift {
+            elements.first_key_value().map(|(key, _)| *key)
+        } else {
+            elements.last_key_value().map(|(key, _)| *key)
+        };
+        if let Some(key) = key {
+            removed_type = elements.remove(&key).map(|(_, element_type)| element_type);
+        }
+
+        if is_shift {
+            *elements = elements.values().cloned().enumerate().collect::<BTreeMap<_, _>>();
+        }
+    }
+
+    result.known_count = result.known_count.map(|count| count.saturating_sub(1));
+    result.non_empty = result.known_count.is_some_and(|count| count > 0)
+        || result.known_elements.as_ref().is_some_and(|elements| elements.values().any(|(optional, _)| !optional));
+
+    if result.known_count == Some(0) {
+        result.element_type = Arc::new(removed_type.unwrap_or_else(get_never));
+        result.known_count = None;
+        result.known_elements = None;
+    }
+
+    result
+}
+
+fn mutate_push_or_unshift(
+    existing_type: &TUnion,
+    inserted_type: TUnion,
+    is_unshift: bool,
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+) -> Option<TUnion> {
+    let mut result = None;
+    for atomic in existing_type.types.as_ref() {
+        let TAtomic::Array(array) = atomic else {
+            return None;
+        };
+
+        let (mut list, was_list) = match array {
+            TArray::List(list) => (list.clone(), true),
+            TArray::Keyed(keyed) if keyed.known_items.is_none() && keyed.parameters.is_none() => {
+                (TList::new(Arc::new(get_never())), true)
+            }
+            TArray::Keyed(keyed) => {
+                let (key_type, value_type) = keyed.parameters.as_ref()?;
+                if key_type.is_int() {
+                    (TList::new(Arc::clone(value_type)), true)
+                } else {
+                    let mut keyed = keyed.clone();
+                    keyed.non_empty = true;
+                    keyed.parameters = Some((
+                        Arc::clone(key_type),
+                        Arc::new(combine_union_types(value_type, &inserted_type, codebase, CombinerOptions::default())),
+                    ));
+                    let mutated = TUnion::from_atomic(TAtomic::Array(TArray::Keyed(keyed)));
+                    result = Some(match result {
+                        Some(existing) => add_union_type(existing, &mutated, codebase, CombinerOptions::default()),
+                        None => mutated,
+                    });
+                    continue;
+                }
+            }
+        };
+
+        if was_list {
+            list.element_type = Arc::new(if list.element_type.is_never() {
+                inserted_type.clone()
+            } else {
+                combine_union_types(&list.element_type, &inserted_type, codebase, CombinerOptions::default())
+            });
+            list.non_empty = true;
+            list.known_count = list.known_count.map(|count| count + 1);
+            if let Some(elements) = list.known_elements.as_mut() {
+                if is_unshift {
+                    *elements =
+                        elements.iter().map(|(index, value)| (index + 1, value.clone())).collect::<BTreeMap<_, _>>();
+                    elements.insert(0, (false, inserted_type.clone()));
+                } else {
+                    let next = elements.last_key_value().map_or(0, |(index, _)| index + 1);
+                    elements.insert(next, (false, inserted_type.clone()));
+                }
+            }
+
+            let mutated = TUnion::from_atomic(TAtomic::Array(TArray::List(list)));
+            result = Some(match result {
+                Some(existing) => add_union_type(existing, &mutated, codebase, CombinerOptions::default()),
+                None => mutated,
+            });
+        }
+    }
+
+    result
 }
 
 /// Records a by-reference mutation in the enclosing loop scope so the multi-pass

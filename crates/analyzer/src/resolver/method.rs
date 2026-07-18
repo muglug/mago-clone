@@ -172,6 +172,10 @@ where
                 continue;
             }
 
+            if object_atomic.is_false() && object_type.ignore_falsable_issues() {
+                continue;
+            }
+
             if object_atomic.is_null() {
                 result.encountered_null = true;
                 if !object_type.ignore_nullable_issues() && !is_null_safe && !object_type.has_nullsafe_null() {

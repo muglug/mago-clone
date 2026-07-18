@@ -110,7 +110,56 @@ Primary baselines: 21 PDO cases, 40 `ArrayFunctionCall` cases, 20 array
 access/assignment/key cases, and the provider-related portion of 44
 `FunctionCall` failures.
 
+Execution checkpoints on `agent/pzoom-providers`:
+
+1. **PDO row modes.** Preserve `PDO::prepare()`'s declared `false` member but
+   honor its internal ignored-falsable contract during member resolution; add
+   mode-sensitive `fetch()` and `fetchAll()` results. Baseline: 0 / 20 focused
+   cases passing. Target: 20 / 20 plus a native test that proves both the
+   retained failure type and safe chained access.
+2. **Structural array transforms.** Correct `array_merge`, `array_reverse`,
+   `array_splice`, and list/key normalization. Record the exact
+   delta within the 40 failing `ArrayFunctionCall` cases.
+3. **Element transforms.** Complete `array_column`, `array_filter`, `array_map`,
+   and `array_reduce`, including callback-derived element types and shape
+   degradation rules.
+4. **Mutation and pointer helpers.** Preserve by-reference list/shape changes
+   for shift/unshift/sort/walk, and return precise `current`, `key`, `count`,
+   first/last-key, and non-empty results.
+5. **Provider gate.** Run the complete native analyzer suite and the full 4,021
+   imported cases, then publish a stacked checkpoint before assertion work.
+
+Phase 2 starting measurements:
+
+- PDO mode subset: 0 passing / 20 failing;
+- complete `ArrayFunctionCall` subset: 171 passing / 40 failing;
+- complete corpus inherited from Phase 1: 3,383 passing / 638 failing.
+
+Phase 2 checkpoint complete:
+
+- PDO mode subset: 20 passing / 0 failing;
+- complete `ArrayFunctionCall` subset: 204 passing / 7 failing;
+- complete corpus: 3,441 passing / 580 failing;
+- 58 previously failing tests resolved and no newly failing tests;
+- mode-sensitive PDO fetch results retain the declared failure sentinel while
+  honoring explicit ignored-falsable metadata at member access;
+- array providers now preserve reindexing, optional shape entries, exact
+  counts, non-emptiness, pointer sentinels, callback filtering, and
+  by-reference mutations where PHP's contract permits it;
+- `array_column()` accepts heterogeneous rows that PHP skips while retaining
+  precise results for shapes, objects, and non-empty inputs;
+- native gate: 2,413 analyzer integrations pass.
+
+The seven remaining `ArrayFunctionCall` failures are not standalone provider
+return gaps: three require callable-array specialization, two require Psalm
+type-alias/list-shape support, one requires loop fixed-point refinement, and
+one requires large literal-union key comparison. They remain assigned to the
+phases that own those mechanics rather than being hidden by broader provider
+types.
+
 ## Phase 3: assertion-contract propagation
+
+Branch: `agent/pzoom-assertion-contracts`
 
 Planned slices:
 
@@ -124,6 +173,30 @@ Planned slices:
    `empty`, `ctype_*` ranges, and union/intersection refinements.
 
 Primary baselines: 39 `AssertAnnotation` and 63 `TypeReconciliation` failures.
+
+Execution checkpoints:
+
+1. **Post-provider baseline.** Recompute the complete `AssertAnnotation` and
+   `TypeReconciliation` sets on the Phase 2 commit, classify failures by
+   declaration parsing, subject mapping, reconciliation, and invalidation,
+   and freeze the exact failure-name lists.
+2. **Canonical contract model.** Normalize unconditional, true-branch, and
+   false-branch contracts from docblocks and inferred bodies into the same
+   access-path assertion representation; retain source and polarity for
+   diagnostics.
+3. **Call-boundary substitution.** Map assertion subjects through positional
+   and named arguments, `$this`, `self`/`static`, inherited methods, and the
+   template bounds produced by Phase 1 before reconciliation runs.
+4. **Access paths and invalidation.** Propagate nested property and method
+   assertions only while their roots remain stable; invalidate paths after
+   by-reference calls, writes, escaping mutable arguments, or unstable
+   dispatch.
+5. **Built-in contracts.** Route `array_key_exists`, chained `isset`/`empty`,
+   and `ctype_*` refinements through the same machinery, including union and
+   intersection subjects.
+6. **Assertion gate.** Add one native regression per generalized invariant,
+   run the complete analyzer suite and 4,021-case corpus, and publish a stacked
+   checkpoint before callable inference begins.
 
 ## Phase 4: callable inference and method-result memoization
 

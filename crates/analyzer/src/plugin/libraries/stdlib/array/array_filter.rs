@@ -15,6 +15,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
+use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::mixed::truthiness::TMixedTruthiness;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::combiner::CombinerOptions;
@@ -124,6 +125,40 @@ fn filter_atomic_array<F>(array: &TArray, filter: &F, codebase: &CodebaseMetadat
 where
     F: Fn(TUnion) -> FilterOutcome,
 {
+    if let TArray::List(list) = array {
+        let (filtered_values, values_are_required) = match filter((*list.element_type).clone()) {
+            FilterOutcome::Removed => {
+                return Some(wrap_atomic(TAtomic::Array(TArray::List(TList::new(Arc::new(
+                    mago_codex::ttype::get_never(),
+                ))))));
+            }
+            FilterOutcome::KeptAsRequired(values) => (values, true),
+            FilterOutcome::KeptAsOptional(values) => (values, false),
+        };
+
+        let mut result = TList::new(Arc::new(filtered_values));
+        result.non_empty = list.non_empty && values_are_required;
+        if let Some(elements) = &list.known_elements {
+            let mut filtered_elements = BTreeMap::new();
+            for (index, (original_optional, element_type)) in elements {
+                match filter(element_type.clone()) {
+                    FilterOutcome::Removed => {}
+                    FilterOutcome::KeptAsRequired(filtered) => {
+                        filtered_elements.insert(*index, (*original_optional, filtered));
+                    }
+                    FilterOutcome::KeptAsOptional(filtered) => {
+                        filtered_elements.insert(*index, (true, filtered));
+                    }
+                }
+            }
+            if !filtered_elements.is_empty() {
+                result.known_elements = Some(filtered_elements);
+            }
+        }
+
+        return Some(wrap_atomic(TAtomic::Array(TArray::List(result))));
+    }
+
     if let TArray::Keyed(keyed) = array
         && keyed.known_items.is_some()
     {

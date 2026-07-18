@@ -7,6 +7,7 @@ pub mod r#enum;
 pub mod filter;
 pub mod json;
 pub mod math;
+pub mod pdo;
 pub mod random;
 pub mod reflection;
 pub mod session;
@@ -48,6 +49,11 @@ impl Plugin for StdlibPlugin {
         registry.register_function_provider(array::ArrayKeyExistsProvider);
         registry.register_function_provider(array::ArrayMapProvider);
         registry.register_function_provider(array::ArrayMergeProvider);
+        registry.register_function_provider(array::ArrayPointerProvider);
+        registry.register_function_provider(array::ArrayKeyProvider);
+        registry.register_function_provider(array::ArrayReverseProvider);
+        registry.register_function_provider(array::ArraySpliceProvider);
+        registry.register_function_provider(array::ArrayShiftPopProvider);
         registry.register_function_provider(array::CompactProvider);
         registry.register_function_provider(url::ParseUrlProvider);
         registry.register_function_provider(filter::FilterVarProvider);
@@ -66,6 +72,7 @@ impl Plugin for StdlibPlugin {
 
         registry.register_method_provider(closure::ClosureGetCurrentProvider);
         registry.register_method_provider(r#enum::EnumCasesProvider);
+        registry.register_method_provider(pdo::PdoStatementReturnTypeProvider);
         registry.register_method_provider(reflection::ReflectionMethodGetNameProvider);
         registry.register_method_provider(reflection::ReflectionMethodInvokeProvider);
 

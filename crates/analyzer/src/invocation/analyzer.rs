@@ -165,6 +165,8 @@ where
         };
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
+        let referenced_parameter = parameter.is_some_and(|p| p.1.is_by_reference())
+            && !is_array_multisort_call_result(&invocation.target, argument_expression);
 
         analyze_and_store_argument_type(
             context,
@@ -174,7 +176,7 @@ where
             argument_expression,
             *argument_offset,
             &mut analyzed_argument_types,
-            parameter.is_some_and(|p| p.1.is_by_reference()),
+            referenced_parameter,
             parameter.is_some_and(|p| p.1.allows_undefined_reference_argument()),
             None,
         )?;
@@ -428,7 +430,7 @@ where
                 method_class_type,
             );
 
-            let final_parameter_type =
+            let mut final_parameter_type =
                 if template_result.has_template_types() || !template_result.lower_bounds.is_empty() {
                     let mut final_parameter_type = inferred_type_replacer::replace_with_polarity(
                         &base_parameter_type,
@@ -450,6 +452,8 @@ where
                 } else {
                     base_parameter_type
                 };
+
+            filter_array_filter_callback_type(&invocation.target, &mut final_parameter_type, &analyzed_argument_types);
 
             verify_argument_type(
                 context,
@@ -1408,6 +1412,13 @@ fn extract_class_name_from_atomic(atomic: &TAtomic) -> Option<Word> {
 /// matching the `mode` argument, so closure parameters get the correct inferred type.
 ///
 /// mode 0 (default) → `callable(V): bool`, mode 1 → `callable(V, K): bool`, mode 2 → `callable(K): bool`
+fn is_array_multisort_call_result(target: &InvocationTarget<'_>, expression: &Expression<'_>) -> bool {
+    matches!(expression, Expression::Call(_))
+        && target.get_function_like_identifier().is_some_and(|identifier| {
+            matches!(identifier, FunctionLikeIdentifier::Function(name) if name.as_bytes().eq_ignore_ascii_case(b"array_multisort"))
+        })
+}
+
 fn filter_array_filter_callback_type(
     target: &InvocationTarget<'_>,
     parameter_type: &mut TUnion,
@@ -1471,4 +1482,35 @@ fn filter_array_filter_callback_type(
             false
         }
     });
+
+    let callback_excludes_null_or_false = analyzed_argument_types.get(&1).is_some_and(|(callback_type, _)| {
+        callback_type.types.iter().any(|atomic| {
+            let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+                return false;
+            };
+            signature
+                .parameters
+                .first()
+                .and_then(|parameter| parameter.get_type_signature())
+                .is_some_and(|parameter_type| !parameter_type.accepts_null() && !parameter_type.accepts_false())
+        })
+    });
+
+    if !callback_excludes_null_or_false {
+        return;
+    }
+
+    for atomic in parameter_type.types.to_mut() {
+        let TAtomic::Callable(TCallable::Signature(signature)) = atomic else {
+            continue;
+        };
+        for parameter in &mut signature.parameters {
+            let Some(parameter_type) = parameter.get_type_signature_mut() else {
+                continue;
+            };
+            if parameter_type.types.len() > 1 {
+                parameter_type.types.to_mut().retain(|atomic| !atomic.is_null() && !atomic.is_false());
+            }
+        }
+    }
 }
