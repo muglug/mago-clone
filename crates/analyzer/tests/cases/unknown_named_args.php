@@ -39,6 +39,16 @@ example_variadic("foo", b: 1, c: 2, d: 3); // ok
 example_variadic(a: "foo", b: 1, c: 2, d: 3); // ok
 example_variadic(b: 1, a: "foo", c: 2, d2: 3); // ok
 
+/** @param Closure(int, int): int ...$callbacks */
+function callback_variadic(Closure ...$callbacks): void
+{
+}
+
+callback_variadic(
+    sum: fn($left, $right) => $left + $right,
+    product: fn($left, $right) => $left * $right,
+); // ok
+
 /// Just because `...` is used, it does not mean the argument is targeting the last variadic parameter
 /// it should only does that if previous parameters have been filled.
 

@@ -33,6 +33,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
+use crate::invocation::arguments::infer_callable_parameter_types;
 use crate::utils::docblock::check_docblock_type_incompatibility;
 use crate::utils::docblock::get_type_from_var_docblock;
 use crate::utils::get_type_diff;
@@ -49,9 +50,23 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Return<'arena> {
         A: Arena,
     {
         let inferred_return_type = if let Some(return_value) = self.value.as_ref() {
+            let contextual_parameter_types =
+                if matches!(return_value.unparenthesized(), Expression::Closure(_) | Expression::ArrowFunction(_)) {
+                    block_context
+                        .scope
+                        .get_function_like()
+                        .and_then(|metadata| metadata.return_type_metadata.as_ref())
+                        .map(|return_type| infer_callable_parameter_types(context.codebase, &return_type.type_union))
+                } else {
+                    None
+                };
+            let previous_inferred_parameter_types =
+                std::mem::replace(&mut artifacts.inferred_parameter_types, contextual_parameter_types);
+
             block_context.flags.set_inside_return(true);
             return_value.analyze(context, block_context, artifacts)?;
             block_context.flags.set_inside_return(false);
+            artifacts.inferred_parameter_types = previous_inferred_parameter_types;
 
             let inferred_return_type = artifacts.get_rc_expression_type(&return_value).cloned();
 

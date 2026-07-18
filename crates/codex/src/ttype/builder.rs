@@ -8,6 +8,7 @@ use mago_phpdoc_syntax::cst::r#type::*;
 use mago_span::*;
 use mago_word::*;
 
+use crate::misc::VariableIdentifier;
 use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::alias::TAlias;
@@ -847,12 +848,15 @@ fn get_callable_from_type(
                 get_mixed()
             };
 
-            parameters.push(TCallableParameter::new(
-                Some(Arc::new(parameter_type)),
-                parameter_ast.is_by_reference(),
-                parameter_ast.is_variadic(),
-                parameter_ast.is_optional(),
-            ));
+            parameters.push(
+                TCallableParameter::new(
+                    Some(Arc::new(parameter_type)),
+                    parameter_ast.is_by_reference(),
+                    parameter_ast.is_variadic(),
+                    parameter_ast.is_optional(),
+                )
+                .with_name(parameter_ast.variable.as_ref().map(|variable| VariableIdentifier(word(variable.value)))),
+            );
         }
 
         if let Some(ret) = specification.return_type.as_ref() {

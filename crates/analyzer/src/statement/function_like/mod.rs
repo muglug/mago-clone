@@ -405,22 +405,31 @@ where
             !union.is_vanilla_array() && !union.is_vanilla_mixed()
         });
 
-        let mut final_parameter_type = if declared_type_is_specific {
-            declared_parameter_type
-        } else if let Some(inferred_map) = inferred_parameter_types.as_mut()
-            && let Some(inferred_type) = inferred_map.remove(&i)
-            && !is_unresolved_template_with_mixed_bound(&inferred_type)
-            && (parameter_metadata.get_type_metadata().is_none()
-                || union_comparator::is_contained_by(
-                    context.codebase,
-                    &inferred_type,
-                    &declared_parameter_type,
-                    true,
-                    true,
-                    false,
-                    &mut ComparisonResult::default(),
-                ))
+        let inferred_type = inferred_parameter_types.as_mut().and_then(|inferred_map| inferred_map.remove(&i));
+        let inferred_type_is_compatible = inferred_type.as_ref().is_some_and(|inferred_type| {
+            !is_unresolved_template_with_mixed_bound(inferred_type)
+                && (parameter_metadata.get_type_metadata().is_none()
+                    || union_comparator::is_contained_by(
+                        context.codebase,
+                        inferred_type,
+                        &declared_parameter_type,
+                        true,
+                        true,
+                        false,
+                        &mut ComparisonResult::default(),
+                    ))
+        });
+        let is_contextual_closure =
+            function_like_metadata.kind.is_closure() || function_like_metadata.kind.is_arrow_function();
+        let inferred_type_narrows_object = inferred_type.as_ref().is_some_and(|inferred_type| {
+            inferred_type.types.iter().all(|atomic| matches!(atomic, TAtomic::Object(_)))
+                && declared_parameter_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Object(_)))
+        });
+
+        let mut final_parameter_type = if inferred_type_is_compatible
+            && (!declared_type_is_specific || (is_contextual_closure && inferred_type_narrows_object))
         {
+            let inferred_type = inferred_type.expect("compatible inferred type must exist");
             if parameter_metadata.get_type_metadata().is_some()
                 && !declared_parameter_type.is_nullable()
                 && inferred_type.is_nullable()
@@ -429,6 +438,8 @@ where
             } else {
                 inferred_type
             }
+        } else if declared_type_is_specific {
+            declared_parameter_type
         } else {
             declared_parameter_type
         };

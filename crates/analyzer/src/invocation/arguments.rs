@@ -3,6 +3,7 @@ use std::collections::hash_map::Entry;
 
 use foldhash::HashMap;
 
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::add_union_type;
 use mago_codex::ttype::atomic::TAtomic;
@@ -67,7 +68,7 @@ pub fn analyze_and_store_argument_type<'ctx, 'arena, A>(
     analyzed_argument_types: &mut HashMap<usize, (TUnion, Span)>,
     referenced_parameter: bool,
     allows_undefined_reference: bool,
-    closure_parameter_type: Option<&TUnion>,
+    contextual_parameter_type: Option<&TUnion>,
 ) -> Result<(), AnalysisError>
 where
     A: Arena,
@@ -76,38 +77,17 @@ where
         return Ok(());
     }
 
-    let inferred_parameter_types = closure_parameter_type.map(|closure_parameter_type| {
-        let mut inferred_parameters = HashMap::default();
-
-        closure_parameter_type
-            .types
-            .as_ref()
-            .iter()
-            .filter_map(|atomic| match atomic {
-                TAtomic::Callable(TCallable::Signature(callable)) => Some(callable),
-                _ => None,
-            })
-            .flat_map(|callable| callable.parameters.iter().enumerate())
-            .filter_map(|(parameter_index, parameter)| {
-                parameter.get_type_signature().map(|param_type| (parameter_index, param_type.clone()))
-            })
-            .for_each(|(parameter_index, parameter_type)| match inferred_parameters.entry(parameter_index) {
-                Entry::Occupied(occupied_entry) => {
-                    let existing_type: TUnion = occupied_entry.remove();
-                    let updated_type =
-                        add_union_type(existing_type, &parameter_type, context.codebase, CombinerOptions::default());
-
-                    inferred_parameters.insert(parameter_index, updated_type);
-                }
-                Entry::Vacant(vacant_entry) => {
-                    vacant_entry.insert(parameter_type);
-                }
-            });
-
-        inferred_parameters
-    });
+    let inferred_parameter_types =
+        if matches!(argument_expression, Expression::Closure(_) | Expression::ArrowFunction(_)) {
+            contextual_parameter_type
+                .map(|parameter_type| infer_callable_parameter_types(context.codebase, parameter_type))
+        } else {
+            None
+        };
 
     let inferred_parameter_types = std::mem::replace(&mut artifacts.inferred_parameter_types, inferred_parameter_types);
+    let contextual_expression_type =
+        std::mem::replace(&mut artifacts.contextual_expression_type, contextual_parameter_type.cloned());
 
     let was_inside_general_use = block_context.flags.inside_general_use();
     let was_inside_call = block_context.flags.inside_call();
@@ -126,6 +106,7 @@ where
     block_context.flags.set_inside_variable_reference(was_inside_variable_reference);
     block_context.flags.set_inside_out_parameter_reference(was_inside_out_parameter_reference);
     artifacts.inferred_parameter_types = inferred_parameter_types;
+    artifacts.contextual_expression_type = contextual_expression_type;
 
     let argument_type = artifacts.get_expression_type(argument_expression).cloned().unwrap_or_else(get_mixed);
 
@@ -159,6 +140,41 @@ where
     Ok(())
 }
 
+/// Extracts positional parameter types from the callable signatures in an
+/// expected type. Multiple callable alternatives are combined per position.
+pub fn infer_callable_parameter_types(
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+    callable_type: &TUnion,
+) -> HashMap<usize, TUnion> {
+    let mut inferred_parameters = HashMap::default();
+
+    callable_type
+        .types
+        .as_ref()
+        .iter()
+        .filter_map(|atomic| match atomic {
+            TAtomic::Callable(TCallable::Signature(callable)) => Some(callable),
+            _ => None,
+        })
+        .flat_map(|callable| callable.parameters.iter().enumerate())
+        .filter_map(|(parameter_index, parameter)| {
+            parameter.get_type_signature().map(|param_type| (parameter_index, param_type.clone()))
+        })
+        .for_each(|(parameter_index, parameter_type)| match inferred_parameters.entry(parameter_index) {
+            Entry::Occupied(occupied_entry) => {
+                let existing_type: TUnion = occupied_entry.remove();
+                let updated_type = add_union_type(existing_type, &parameter_type, codebase, CombinerOptions::default());
+
+                inferred_parameters.insert(parameter_index, updated_type);
+            }
+            Entry::Vacant(vacant_entry) => {
+                vacant_entry.insert(parameter_type);
+            }
+        });
+
+    inferred_parameters
+}
+
 /// Verifies an argument's type against the expected parameter type.
 pub fn verify_argument_type<'arena, A>(
     context: &mut Context<'_, 'arena, A>,
@@ -170,6 +186,22 @@ pub fn verify_argument_type<'arena, A>(
 ) where
     A: Arena,
 {
+    // `call_user_func` accepts any callable shape. Its generic callable
+    // signature exists to infer the return type and validate the subsequent
+    // forwarded arguments, not to reject a first-class callable because its
+    // parameter list is more precise than the synthetic variadic signature.
+    if argument_offset == 0
+        && invocation_target.get_function_like_identifier().is_some_and(|identifier| {
+            matches!(identifier, FunctionLikeIdentifier::Function(name) if name.as_bytes().eq_ignore_ascii_case(b"call_user_func"))
+        })
+        && input_type
+            .types
+            .iter()
+            .all(|atomic| cast_atomic_to_callable(atomic, context.codebase, None).is_some())
+    {
+        return;
+    }
+
     let target_kind_str = invocation_target.guess_kind();
 
     if input_type.is_never() {

@@ -281,6 +281,11 @@ impl TType for TCallable {
                         buf.extend_from_slice(b"mixed");
                     }
 
+                    if let Some(name) = parameter.get_name() {
+                        buf.extend_from_slice(b" ");
+                        buf.extend_from_slice(name.0.as_bytes());
+                    }
+
                     if parameter.has_default() {
                         buf.extend_from_slice(b"=");
                     }
@@ -341,6 +346,11 @@ impl TType for TCallable {
                             buf.extend_from_slice(parameter_type.get_pretty_id_with_indent(param_indent).as_bytes());
                         } else {
                             buf.extend_from_slice(b"mixed");
+                        }
+
+                        if let Some(name) = parameter.get_name() {
+                            buf.extend_from_slice(b" ");
+                            buf.extend_from_slice(name.0.as_bytes());
                         }
 
                         if parameter.has_default() {

@@ -45,6 +45,8 @@ use crate::invocation::arguments::get_unpacked_argument_type;
 use crate::invocation::arguments::verify_argument_type;
 use crate::invocation::template_inference::infer_parameter_templates_from_argument;
 use crate::invocation::template_inference::infer_parameter_templates_from_default;
+use crate::invocation::template_inference::infer_templates_from_contextual_callable_return;
+use crate::invocation::template_inference::specialize_callable_argument_templates;
 use crate::invocation::template_result::check_template_result;
 use crate::invocation::template_result::get_class_template_parameters_from_result;
 use crate::invocation::template_result::populate_template_result_from_invocation;
@@ -63,7 +65,12 @@ where
 {
     // Handle both named arguments and named placeholders
     if let Some(parameter_name) = argument.get_parameter_name() {
-        argument_offset = find_named_parameter_offset(target, parameter_name.into())?;
+        argument_offset = find_named_parameter_offset(target, parameter_name.into()).or_else(|| {
+            target
+                .parameter_count()
+                .checked_sub(1)
+                .filter(|offset| target.get_parameter(*offset).is_some_and(|parameter| parameter.is_variadic()))
+        })?;
     }
 
     argument_offset = adjust_offset_for_variadic(target, argument_offset);
@@ -131,6 +138,17 @@ where
 
     populate_template_result_from_invocation(context, invocation, template_result);
 
+    if let Some(contextual_type) = artifacts.contextual_expression_type.as_ref()
+        && let Some(declared_return_type) = invocation.target.get_return_type()
+    {
+        infer_templates_from_contextual_callable_return(
+            context,
+            declared_return_type,
+            contextual_type,
+            template_result,
+        );
+    }
+
     let arg_count = invocation.arguments_source.argument_count();
     let mut analyzed_argument_types = HashMap::default();
 
@@ -165,6 +183,42 @@ where
         };
 
         let parameter = get_parameter_of_argument(&invocation.target, argument, *argument_offset);
+        let base_parameter_type = parameter.map(|(_, parameter_ref)| {
+            get_parameter_type(
+                context,
+                Some(parameter_ref),
+                base_class_metadata,
+                calling_class_like_metadata,
+                calling_instance_type,
+                method_class_type,
+            )
+        });
+        let contextual_parameter_type = base_parameter_type.as_ref().map(|base_parameter_type| {
+            let mut contextual_parameter_type =
+                if template_result.has_template_types() || !template_result.lower_bounds.is_empty() {
+                    inferred_type_replacer::replace_with_polarity(
+                        base_parameter_type,
+                        template_result,
+                        context.codebase,
+                        mago_codex::ttype::template::variance::Variance::Contravariant,
+                    )
+                } else {
+                    base_parameter_type.clone()
+                };
+
+            if contextual_parameter_type.is_expandable() {
+                expander::expand_union(
+                    context.codebase,
+                    &mut contextual_parameter_type,
+                    &TypeExpansionOptions {
+                        self_class: base_class_metadata.map(|meta| meta.name),
+                        ..Default::default()
+                    },
+                );
+            }
+
+            contextual_parameter_type
+        });
         let referenced_parameter = parameter.is_some_and(|p| p.1.is_by_reference())
             && !is_array_multisort_call_result(&invocation.target, argument_expression);
 
@@ -178,29 +232,30 @@ where
             &mut analyzed_argument_types,
             referenced_parameter,
             parameter.is_some_and(|p| p.1.allows_undefined_reference_argument()),
-            None,
+            contextual_parameter_type.as_ref(),
         )?;
 
-        if let Some(argument_type) = analyzed_argument_types.get(argument_offset)
-            && let Some((_, parameter_ref)) = parameter
+        if let Some((argument_type, argument_span)) = analyzed_argument_types.get(argument_offset).cloned()
+            && let Some(base_parameter_type) = base_parameter_type
         {
-            let parameter_type = get_parameter_type(
+            let specialized_argument_type = specialize_callable_argument_templates(
                 context,
-                Some(parameter_ref),
-                base_class_metadata,
-                calling_class_like_metadata,
-                calling_instance_type,
-                method_class_type,
+                &argument_type,
+                contextual_parameter_type.as_ref().unwrap_or(&base_parameter_type),
             );
+            if specialized_argument_type != argument_type {
+                artifacts.set_expression_type(argument_expression, specialized_argument_type.clone());
+                analyzed_argument_types.insert(*argument_offset, (specialized_argument_type.clone(), argument_span));
+            }
 
-            if parameter_type.has_template_types() {
+            if base_parameter_type.has_template_types() {
                 infer_parameter_templates_from_argument(
                     context,
-                    &parameter_type,
-                    &argument_type.0,
+                    &base_parameter_type,
+                    &specialized_argument_type,
                     template_result,
                     *argument_offset,
-                    argument_type.1,
+                    argument_span,
                     false,
                 );
             }

@@ -24,6 +24,7 @@ use mago_codex::ttype::atomic::scalar::float::TFloat;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringLiteral;
+use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::combiner;
 use mago_codex::ttype::combiner::CombinerOptions;
 use mago_codex::ttype::comparator::ComparisonResult;
@@ -376,7 +377,11 @@ where
             return Some(TAtomic::Scalar(TScalar::String(string.as_callable())));
         }
 
-        return Some(first_type.clone());
+        return Some(if cast_atomic_to_callable(first_type, context.codebase, None).is_some() {
+            first_type.clone()
+        } else {
+            second_type.clone()
+        });
     }
 
     if matches!(first_type, TAtomic::Callable(_)) && second_type.can_be_callable() {

@@ -20,6 +20,7 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::callable::TCallable;
+use mago_codex::ttype::atomic::callable::TCallableSignature;
 use mago_codex::ttype::atomic::mixed::TMixed;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -1082,6 +1083,125 @@ pub fn infer_templates_for_method_call<'ctx, A>(
             &mut Vec::default(),
         );
     }
+}
+
+/// Specializes templates owned by a callable argument against the callable shape
+/// expected by its receiving parameter.
+///
+/// A first-class callable such as `identity(...)` retains the templates declared
+/// by `identity`. Those templates belong to the inner callable, not to the outer
+/// invocation receiving it. They therefore need to be solved from the expected
+/// callable parameters before the outer invocation infers its own templates.
+/// This mirrors the high-order callable remapping performed by Psalm/Pzoom.
+pub fn specialize_callable_argument_templates<A>(
+    context: &Context<'_, '_, A>,
+    argument_type: &TUnion,
+    parameter_type: &TUnion,
+) -> TUnion
+where
+    A: Arena,
+{
+    let expected_signatures: Vec<Cow<'_, TCallableSignature>> = parameter_type
+        .types
+        .iter()
+        .filter_map(|atomic| {
+            let TAtomic::Callable(callable) = atomic else {
+                return None;
+            };
+
+            match callable {
+                TCallable::Signature(signature) => Some(Cow::Borrowed(signature)),
+                TCallable::Alias(identifier) => {
+                    get_signature_of_function_like_identifier(identifier, context.codebase).map(Cow::Owned)
+                }
+            }
+        })
+        .collect();
+
+    if expected_signatures.is_empty() {
+        return argument_type.clone();
+    }
+
+    let specialized_atomics = argument_type
+        .types
+        .iter()
+        .map(|atomic| {
+            let TAtomic::Callable(TCallable::Signature(candidate_signature)) = atomic else {
+                return atomic.clone();
+            };
+
+            let mut callable_template_result = TemplateResult::default();
+            for expected_signature in &expected_signatures {
+                for (candidate_parameter, expected_parameter) in
+                    candidate_signature.get_parameters().iter().zip(expected_signature.get_parameters().iter())
+                {
+                    let (Some(candidate_type), Some(expected_type)) =
+                        (candidate_parameter.get_type_signature(), expected_parameter.get_type_signature())
+                    else {
+                        continue;
+                    };
+
+                    infer_templates_from_input_and_container_types(
+                        context,
+                        candidate_type,
+                        expected_type,
+                        &mut callable_template_result,
+                        InferenceOptions::default(),
+                        &mut Vec::new(),
+                    );
+                }
+            }
+
+            // Only substitute templates declared by the callable itself. Class
+            // templates belong to its receiver and must remain localized by the
+            // normal method-resolution path.
+            callable_template_result.lower_bounds.retain(|_, bounds_by_parent| {
+                bounds_by_parent.retain(|parent, _| matches!(parent, GenericParent::FunctionLike(_)));
+                !bounds_by_parent.is_empty()
+            });
+
+            if callable_template_result.lower_bounds.is_empty() {
+                return atomic.clone();
+            }
+
+            inferred_type_replacer::replace(
+                &TUnion::from_atomic(atomic.clone()),
+                &callable_template_result,
+                context.codebase,
+            )
+            .get_single()
+            .clone()
+        })
+        .collect();
+
+    argument_type.clone_with_types(specialized_atomics)
+}
+
+/// Seeds an invocation's templates from an expected callable result before its
+/// arguments are analyzed. This lets a call such as `filter(fn($x) => ...)`
+/// receive `T` from the outer pipeline's `callable(list<T>): ...` contract.
+pub fn infer_templates_from_contextual_callable_return<A>(
+    context: &Context<'_, '_, A>,
+    declared_return_type: &TUnion,
+    contextual_type: &TUnion,
+    template_result: &mut TemplateResult,
+) where
+    A: Arena,
+{
+    let return_is_callable = declared_return_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_)));
+    let context_is_callable = contextual_type.types.iter().any(|atomic| matches!(atomic, TAtomic::Callable(_)));
+    if !return_is_callable || !context_is_callable || !declared_return_type.has_template_types() {
+        return;
+    }
+
+    infer_templates_from_input_and_container_types(
+        context,
+        declared_return_type,
+        contextual_type,
+        template_result,
+        InferenceOptions::default(),
+        &mut Vec::new(),
+    );
 }
 
 /// Infers template types for a parameter based on a **passed argument**.

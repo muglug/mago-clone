@@ -201,9 +201,7 @@ impl TAtomic {
     pub fn is_object_type(&self) -> bool {
         match self {
             TAtomic::Object(_) => true,
-            TAtomic::Callable(callable) => {
-                callable.get_signature().is_none_or(callable::TCallableSignature::is_closure)
-            }
+            TAtomic::Callable(_) => true,
             TAtomic::GenericParameter(parameter) => parameter.is_constrained_as_objecty(),
             _ => false,
         }
@@ -752,7 +750,7 @@ impl TAtomic {
             TAtomic::Callable(_)
                 | TAtomic::Scalar(TScalar::String(_))
                 | TAtomic::Array(TArray::List(_) | TArray::Keyed(_))
-                | TAtomic::Object(TObject::Named(_))
+                | TAtomic::Object(TObject::Any | TObject::Named(_))
         )
     }
 

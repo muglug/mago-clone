@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use crate::misc::VariableIdentifier;
 use crate::ttype::union::TUnion;
 
 /// Represents metadata for a single parameter within a `callable` type signature.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TCallableParameter {
+    /// The declared parameter name, including its leading `$`, when known.
+    name: Option<VariableIdentifier>,
     /// The type hint for the parameter, if specified within the callable signature.
     /// `None` if no specific type is given (equivalent to `mixed`).
     type_signature: Option<Arc<TUnion>>,
@@ -34,7 +37,22 @@ impl TCallableParameter {
         is_variadic: bool,
         has_default: bool,
     ) -> Self {
-        Self { type_signature, is_by_reference, is_variadic, has_default }
+        Self { name: None, type_signature, is_by_reference, is_variadic, has_default }
+    }
+
+    /// Sets the declared parameter name used for named-argument matching.
+    #[inline]
+    #[must_use]
+    pub fn with_name(mut self, name: Option<VariableIdentifier>) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Returns the declared parameter name, if the signature retained one.
+    #[inline]
+    #[must_use]
+    pub const fn get_name(&self) -> Option<&VariableIdentifier> {
+        self.name.as_ref()
     }
 
     /// Returns a reference to the parameter's type signature (`TUnion`), if specified.
