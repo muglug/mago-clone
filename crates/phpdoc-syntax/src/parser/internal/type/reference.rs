@@ -1,6 +1,7 @@
 use crate::cst::identifier::Identifier;
 use crate::cst::r#type::CallableType;
 use crate::cst::r#type::CallableTypeKind;
+use crate::cst::r#type::EmptyCall;
 use crate::cst::r#type::GlobalWildcardSelector;
 use crate::cst::r#type::GlobalWildcardType;
 use crate::cst::r#type::MemberReferenceSelector;
@@ -44,11 +45,23 @@ where
 
         let identifier = Identifier::from_token(self.stream.consume()?, file_id);
 
-        if self.stream.is_at(TokenKind::ColonColon) {
+        let call = if identifier.value.eq_ignore_ascii_case(b"func_num_args")
+            && self.stream.is_at(TokenKind::LeftParenthesis)
+            && self.stream.lookahead(1).is_some_and(|token| token.kind == TokenKind::RightParenthesis)
+        {
+            Some(EmptyCall {
+                left_parenthesis: self.stream.consume_span()?,
+                right_parenthesis: self.stream.consume_span()?,
+            })
+        } else {
+            None
+        };
+
+        if call.is_none() && self.stream.is_at(TokenKind::ColonColon) {
             return self.parse_member_reference(ReferenceKind::Identifier(identifier));
         }
 
-        if self.stream.is_at(TokenKind::Asterisk) {
+        if call.is_none() && self.stream.is_at(TokenKind::Asterisk) {
             let asterisk = self.stream.consume_span()?;
 
             return Ok(Type::GlobalWildcardReference(GlobalWildcardType {
@@ -56,9 +69,9 @@ where
             }));
         }
 
-        let parameters = self.parse_generic_parameters_or_none()?;
+        let parameters = if call.is_some() { None } else { self.parse_generic_parameters_or_none()? };
 
-        Ok(Type::Reference(ReferenceType { kind: ReferenceKind::Identifier(identifier), parameters }))
+        Ok(Type::Reference(ReferenceType { kind: ReferenceKind::Identifier(identifier), call, parameters }))
     }
 
     pub(crate) fn parse_named_reference(&mut self, kind: ReferenceKind<'arena>) -> Result<Type<'arena>, ParseError> {
@@ -68,7 +81,7 @@ where
 
         let parameters = self.parse_generic_parameters_or_none()?;
 
-        Ok(Type::Reference(ReferenceType { kind, parameters }))
+        Ok(Type::Reference(ReferenceType { kind, call: None, parameters }))
     }
 
     fn parse_member_reference(&mut self, kind: ReferenceKind<'arena>) -> Result<Type<'arena>, ParseError> {

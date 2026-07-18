@@ -11,12 +11,17 @@ use crate::ttype::TType;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::callable::TCallable;
+use crate::ttype::atomic::conditional::TConditional;
 use crate::ttype::atomic::derived::TDerived;
 use crate::ttype::atomic::generic::TGenericParameter;
 use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::scalar::TScalar;
 use crate::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use crate::ttype::combiner;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::union_comparator;
+use crate::ttype::expander;
+use crate::ttype::expander::TypeExpansionOptions;
 use crate::ttype::get_mixed;
 use crate::ttype::get_never;
 use crate::ttype::intersect_union_types;
@@ -43,6 +48,13 @@ pub fn replace_with_polarity(
     let mut new_types = Vec::new();
 
     for atomic_type in union.types.as_ref() {
+        if let TAtomic::Conditional(conditional) = atomic_type
+            && let Some(resolved) = replace_conditional(conditional, template_result, codebase, polarity)
+        {
+            new_types.extend(resolved.types.into_owned());
+            continue;
+        }
+
         let mut atomic_type = atomic_type.clone();
         atomic_type = replace_atomic(atomic_type, template_result, codebase, polarity);
 
@@ -150,6 +162,137 @@ pub fn replace_with_polarity(
     }
 
     union.clone_with_types(combiner::combine(new_types, codebase, combiner::CombinerOptions::default()))
+}
+
+/// Resolve an inferred-template conditional at the substitution layer.
+///
+/// The subject is partitioned atomic-by-atomic and each selected arm receives
+/// an exact temporary lower bound. Keeping this in the recursive replacer is
+/// important: conditional types can occur inside arrays, callable signatures,
+/// and generic object parameters, not only as a top-level return atomic.
+fn replace_conditional(
+    conditional: &TConditional,
+    template_result: &TemplateResult,
+    codebase: &CodebaseMetadata,
+    polarity: Variance,
+) -> Option<TUnion> {
+    let TAtomic::GenericParameter(subject_template) = conditional.subject.get_single() else {
+        return None;
+    };
+
+    let subject = replace_template_parameter(
+        &template_result.lower_bounds,
+        subject_template.parameter_name,
+        &subject_template.defining_entity,
+        codebase,
+        &subject_template.constraint,
+        subject_template.intersection_types.as_ref(),
+        template_result,
+        subject_template.parameter_name,
+    )?;
+    let mut target = replace_with_polarity(&conditional.target, template_result, codebase, polarity);
+    // Conditional targets may be class constants. Resolve them before
+    // partitioning; comparing an inferred literal to an unresolved member
+    // reference can incorrectly prove the types disjoint and discard an arm.
+    expander::expand_union(codebase, &mut target, &TypeExpansionOptions::default());
+
+    let mut matching_types = Vec::new();
+    let mut non_matching_types = Vec::new();
+    let mut has_undecidable_type = subject.is_never();
+
+    for candidate_atomic in subject.types.as_ref() {
+        let candidate = TUnion::from_atomic(candidate_atomic.clone());
+        let candidate_is_contained = union_comparator::is_contained_by(
+            codebase,
+            &candidate,
+            &target,
+            false,
+            false,
+            true,
+            &mut ComparisonResult::new(),
+        );
+
+        let are_int_float_disjoint = if target.is_single() && candidate.is_single() {
+            matches!(
+                (candidate.effective_int_or_float(), target.effective_int_or_float()),
+                (Some(true), Some(false)) | (Some(false), Some(true))
+            )
+        } else {
+            false
+        };
+        let are_disjoint = are_int_float_disjoint
+            || !union_comparator::can_expression_types_be_identical(codebase, &candidate, &target, false, false);
+
+        if candidate_is_contained {
+            matching_types.push(candidate_atomic.clone());
+        } else if are_disjoint {
+            non_matching_types.push(candidate_atomic.clone());
+        } else {
+            has_undecidable_type = true;
+        }
+    }
+
+    let mut resolved_types = Vec::new();
+
+    if !matching_types.is_empty() {
+        let branch = if conditional.negated { &conditional.otherwise } else { &conditional.then };
+        resolved_types.extend(
+            replace_conditional_branch(
+                branch,
+                template_result,
+                subject_template,
+                TUnion::from_vec(matching_types),
+                codebase,
+                polarity,
+            )
+            .types
+            .into_owned(),
+        );
+    }
+
+    if !non_matching_types.is_empty() {
+        let branch = if conditional.negated { &conditional.then } else { &conditional.otherwise };
+        resolved_types.extend(
+            replace_conditional_branch(
+                branch,
+                template_result,
+                subject_template,
+                TUnion::from_vec(non_matching_types),
+                codebase,
+                polarity,
+            )
+            .types
+            .into_owned(),
+        );
+    }
+
+    if has_undecidable_type || resolved_types.is_empty() {
+        resolved_types
+            .extend(replace_with_polarity(&conditional.then, template_result, codebase, polarity).types.into_owned());
+        resolved_types.extend(
+            replace_with_polarity(&conditional.otherwise, template_result, codebase, polarity).types.into_owned(),
+        );
+    }
+
+    Some(TUnion::from_vec(combiner::combine(resolved_types, codebase, combiner::CombinerOptions::default())))
+}
+
+fn replace_conditional_branch(
+    branch: &TUnion,
+    template_result: &TemplateResult,
+    subject_template: &TGenericParameter,
+    refined_subject: TUnion,
+    codebase: &CodebaseMetadata,
+    polarity: Variance,
+) -> TUnion {
+    let mut refined_result = template_result.clone();
+    refined_result
+        .lower_bounds
+        .entry(subject_template.parameter_name)
+        .or_default()
+        .insert(subject_template.defining_entity, vec![TemplateBound::new(refined_subject, 0, None, None)]);
+
+    replace_with_polarity(branch, &refined_result, codebase, polarity)
 }
 
 #[allow(clippy::too_many_arguments)]

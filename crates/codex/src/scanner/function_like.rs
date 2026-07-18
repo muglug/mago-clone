@@ -57,6 +57,7 @@ use crate::scanner::ttype::get_type_metadata_from_type;
 use crate::scanner::ttype::merge_type_preserving_nullability;
 use crate::scanner::version_claim::evaluate_version_attributes;
 use crate::ttype::builder;
+use crate::ttype::get_int;
 use crate::ttype::get_mixed;
 use crate::ttype::resolution::TypeResolutionContext;
 use crate::ttype::template::GenericTemplate;
@@ -664,7 +665,54 @@ fn scan_function_like_docblock<A>(
 
     if let Some(return_type) = return_tag.as_ref() {
         match get_type_metadata_from_type(return_type.r#type, classname, &type_context, scope) {
-            Ok(return_type_signature) => {
+            Ok(mut return_type_signature) => {
+                let subject_names = conditional_subject_names(&return_type_signature.type_union);
+                for subject_name in &subject_names {
+                    let subject_name = *subject_name;
+                    if metadata.template_types.contains_key(&subject_name) {
+                        continue;
+                    }
+
+                    let constraint = if subject_name.as_bytes().starts_with(b"$") {
+                        metadata
+                            .get_parameter(subject_name)
+                            .and_then(|parameter| parameter.get_type_metadata())
+                            .map(|metadata| metadata.type_union.clone())
+                            .unwrap_or_else(get_mixed)
+                    } else if subject_name.as_bytes().eq_ignore_ascii_case(b"TFunctionArgCount")
+                        || subject_name.as_bytes().eq_ignore_ascii_case(b"PHP_MAJOR_VERSION")
+                        || subject_name.as_bytes().eq_ignore_ascii_case(b"PHP_VERSION_ID")
+                    {
+                        get_int()
+                    } else {
+                        continue;
+                    };
+
+                    let definition = GenericTemplate::new(GenericParent::FunctionLike(functionlike_id), constraint);
+                    metadata.add_template_type(subject_name, definition.clone());
+                    type_context = type_context.with_template_definition(subject_name, vec![definition]);
+                }
+
+                if !subject_names.is_empty() {
+                    // Rebuild with the generated definitions in scope. This
+                    // turns subjects and matching branch references into the
+                    // same generic parameter consumed by template replacement.
+                    match get_type_metadata_from_type(return_type.r#type, classname, &type_context, scope) {
+                        Ok(rebuilt) => return_type_signature = rebuilt,
+                        Err(typing_error) => {
+                            metadata.issues.push(
+                                Issue::error("Failed to resolve generated conditional subjects.")
+                                    .with_code(ScanningIssueKind::InvalidReturnTag)
+                                    .with_annotation(
+                                        Annotation::primary(typing_error.span()).with_message(typing_error.to_string()),
+                                    )
+                                    .with_note(typing_error.note())
+                                    .with_help(typing_error.help()),
+                            );
+                        }
+                    }
+                }
+
                 metadata.set_return_type_metadata(Some(return_type_signature));
             }
             Err(typing_error) => {
@@ -790,6 +838,29 @@ fn scan_function_like_docblock<A>(
             return_type.type_union.set_ignore_falsable_issues(ignore_falsable_return);
         }
     }
+}
+
+/// Find non-declared conditional inputs in a built signature. The first pass
+/// intentionally leaves these as `TAtomic::Variable`; after registering them
+/// as generated templates, the signature is rebuilt in the enriched type
+/// context.
+fn conditional_subject_names(union: &crate::ttype::union::TUnion) -> WordSet {
+    use crate::ttype::TType;
+    use crate::ttype::TypeRef;
+    use crate::ttype::atomic::TAtomic;
+
+    let mut subjects = WordSet::default();
+    for child in union.get_all_child_nodes() {
+        let TypeRef::Atomic(TAtomic::Conditional(conditional)) = child else {
+            continue;
+        };
+
+        if let TAtomic::Variable(name) = conditional.subject.get_single() {
+            subjects.insert(*name);
+        }
+    }
+
+    subjects
 }
 
 fn parse_assertions_from_tag(

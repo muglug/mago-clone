@@ -1,6 +1,7 @@
 use mago_codex::metadata::CodebaseMetadata;
 use mago_codex::metadata::function_like::FunctionLikeMetadata;
 use mago_codex::ttype::TType;
+use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::comparator::ComparisonResult;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::expander::StaticClassType;
@@ -165,6 +166,7 @@ pub fn validate_method_signature_compatibility(
             expand_union(codebase, &mut expanded_child_param_type, &expansion_options);
         }
 
+        let mut comparison_result = ComparisonResult::new();
         let is_compatible = union_comparator::is_contained_by(
             codebase,
             &expanded_parent_param_type,
@@ -172,8 +174,17 @@ pub fn validate_method_signature_compatibility(
             false,
             false,
             false,
+            &mut comparison_result,
+        ) || matches!(expanded_child_param_type.get_single(), TAtomic::GenericParameter(template)
+        if union_comparator::is_contained_by(
+            codebase,
+            &expanded_parent_param_type,
+            &template.constraint,
+            false,
+            false,
+            false,
             &mut ComparisonResult::new(),
-        );
+        ));
 
         if !is_compatible {
             issues.push(SignatureCompatibilityIssue::IncompatibleParameterType {
