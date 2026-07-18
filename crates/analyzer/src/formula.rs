@@ -13,10 +13,8 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::*;
-use mago_syntax::walker::Walker;
 use mago_word::Word;
 use mago_word::WordMap;
-use mago_word::WordSet;
 
 use crate::artifacts::AnalysisArtifacts;
 use crate::assertion::scrape_assertions;
@@ -25,64 +23,6 @@ use crate::context::assertion::AssertionContext;
 use crate::context::scope::var_has_root;
 use crate::utils::expression::get_expression_id;
 use crate::utils::misc::unwrap_expression;
-
-#[derive(Debug, Clone, Copy)]
-struct AssignmentProvenanceWalker;
-
-struct AssignmentProvenanceContext<'ctx, 'arena, 'artifacts, A> {
-    assertion_context: AssertionContext<'ctx, 'arena, A>,
-    artifacts: &'artifacts AnalysisArtifacts,
-    redefined_vars: WordSet,
-    redefined_var_types: WordMap<IndexMap<u64, Assertion>>,
-}
-
-impl<'ast, 'arena, 'ctx, 'artifacts, A> Walker<'ast, 'arena, AssignmentProvenanceContext<'ctx, 'arena, 'artifacts, A>>
-    for AssignmentProvenanceWalker
-{
-    fn walk_in_assignment(
-        &self,
-        assignment: &'ast Assignment<'arena>,
-        context: &mut AssignmentProvenanceContext<'ctx, 'arena, 'artifacts, A>,
-    ) {
-        if let Some(var_id) = get_expression_id(
-            assignment.lhs,
-            context.assertion_context.this_class_name,
-            context.assertion_context.resolved_names,
-            Some(context.assertion_context.codebase),
-        ) {
-            context.redefined_vars.insert(var_id);
-            if let Some(assigned_type) = context.artifacts.get_expression_type(&assignment.rhs) {
-                let assigned_types = assigned_type
-                    .types
-                    .iter()
-                    .filter(|atomic| !atomic.is_mixed())
-                    .map(|atomic| {
-                        let assertion = Assertion::IsType(atomic.clone());
-                        (assertion.to_hash(), assertion)
-                    })
-                    .collect::<IndexMap<_, _>>();
-                if !assigned_types.is_empty() {
-                    context.redefined_var_types.insert(var_id, assigned_types);
-                }
-            }
-        }
-    }
-}
-
-fn get_assignment_provenance<A>(
-    expression: &Expression<'_>,
-    assertion_context: AssertionContext<'_, '_, A>,
-    artifacts: &AnalysisArtifacts,
-) -> (WordSet, WordMap<IndexMap<u64, Assertion>>) {
-    let mut context = AssignmentProvenanceContext {
-        assertion_context,
-        artifacts,
-        redefined_vars: WordSet::default(),
-        redefined_var_types: WordMap::default(),
-    };
-    AssignmentProvenanceWalker.walk_expression(expression, &mut context);
-    (context.redefined_vars, context.redefined_var_types)
-}
 
 /// Recursively traverses a conditional expression to generate a corresponding logical formula.
 ///
@@ -210,14 +150,19 @@ where
                         type_map.insert(assertion.to_hash(), assertion);
                         clause_map.insert(var_name, type_map);
 
-                        return Some(vec![Clause::new(
+                        let clause = Clause::new(
                             clause_map,
                             conditional_object_id,
                             creating_object_id,
                             Some(false),
                             Some(true),
                             Some(false),
-                        )]);
+                        );
+                        return Some(vec![if matches!(unwrap_expression(binary.rhs), Expression::Assignment(_)) {
+                            clause.mark_redefined(var_name)
+                        } else {
+                            clause
+                        }]);
                     }
 
                     let formula = get_formula(
@@ -261,14 +206,19 @@ where
                         type_map.insert(assertion.to_hash(), assertion);
                         clause_map.insert(var_name, type_map);
 
-                        return Some(vec![Clause::new(
+                        let clause = Clause::new(
                             clause_map,
                             conditional_object_id,
                             creating_object_id,
                             Some(false),
                             Some(true),
                             Some(false),
-                        )]);
+                        );
+                        return Some(vec![if matches!(unwrap_expression(binary.lhs), Expression::Assignment(_)) {
+                            clause.mark_redefined(var_name)
+                        } else {
+                            clause
+                        }]);
                     }
 
                     let formula = get_formula(
@@ -412,14 +362,11 @@ where
         );
     }
 
-    let (redefined_vars, redefined_var_types) = get_assignment_provenance(expression, assertion_context, artifacts);
     let mut formula = get_formula_from_assertions(
         conditional_object_id,
         creating_object_id,
         expression,
         scrape_assertions(expression, artifacts, assertion_context),
-        &redefined_vars,
-        &redefined_var_types,
         formula_size_threshold,
     )?;
 
@@ -576,21 +523,7 @@ where
             )?
         } else {
             let assertions = scrape_equality_assertions(subject, is_identity, condition, artifacts, assertion_context);
-            let (mut redefined_vars, mut redefined_var_types) =
-                get_assignment_provenance(subject, assertion_context, artifacts);
-            let (condition_redefined_vars, condition_redefined_var_types) =
-                get_assignment_provenance(condition, assertion_context, artifacts);
-            redefined_vars.extend(condition_redefined_vars);
-            redefined_var_types.extend(condition_redefined_var_types);
-            get_formula_from_assertions(
-                condition_span,
-                subject_span,
-                subject,
-                assertions,
-                &redefined_vars,
-                &redefined_var_types,
-                formula_size_threshold,
-            )?
+            get_formula_from_assertions(condition_span, subject_span, subject, assertions, formula_size_threshold)?
         };
 
         clauses = disjoin_clauses(clauses, formula, condition_span, algebra_thresholds);
@@ -607,13 +540,16 @@ fn get_formula_from_assertions(
     creating_object_id: Span,
     conditional: &Expression,
     anded_assertions: Vec<WordMap<AssertionSet>>,
-    redefined_vars: &WordSet,
-    redefined_var_types: &WordMap<IndexMap<u64, Assertion>>,
     formula_size_threshold: u16,
 ) -> Option<Vec<Clause>> {
     let mut clauses = Vec::new();
     for assertions in anded_assertions {
         for (var_id, anded_types) in assertions {
+            let (var_id, redefined) = if let Some(stripped) = var_id.as_bytes().strip_prefix(b"=") {
+                (mago_word::word(stripped), true)
+            } else {
+                (var_id, false)
+            };
             for orred_types in anded_types {
                 let Some(first_type) = orred_types.first() else {
                     continue; // should not happen
@@ -635,14 +571,7 @@ fn get_formula_from_assertions(
                     Some(true),
                     Some(has_equality),
                 );
-                clauses.push(if redefined_vars.contains(&var_id) {
-                    match redefined_var_types.get(&var_id) {
-                        Some(assigned_types) => clause.mark_redefined_with_types(var_id, assigned_types.clone()),
-                        None => clause.mark_redefined(var_id),
-                    }
-                } else {
-                    clause
-                });
+                clauses.push(if redefined { clause.mark_redefined(var_id) } else { clause });
             }
         }
     }

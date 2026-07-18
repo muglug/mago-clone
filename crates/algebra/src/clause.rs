@@ -11,7 +11,6 @@ use mago_codex::assertion::Assertion;
 use mago_codex::ttype::TType;
 use mago_span::Span;
 use mago_word::Word;
-use mago_word::WordMap;
 use mago_word::WordSet;
 use mago_word::concat_word;
 use mago_word::empty_word;
@@ -27,13 +26,12 @@ pub struct Clause {
     pub reconcilable: bool,
     pub generated: bool,
     /// Variables reassigned while evaluating the conditional that produced
-    /// this clause. Assertions for these variables describe their
-    /// post-assignment values, so they must supersede stale earlier truths.
+    /// this clause. The ordinary possibilities for these variables describe
+    /// their post-assignment values, so they must supersede stale earlier truths.
+    ///
+    /// This deliberately mirrors Pzoom's clause contract: clauses carry only
+    /// provenance, never a second map of reconciled or assigned variable types.
     pub redefined_vars: WordSet,
-    /// The value types written by those assignments. These are kept separate
-    /// from the path assertion so negating a condition negates only the test,
-    /// not the fact that its assignment has already executed.
-    pub redefined_var_types: WordMap<IndexMap<u64, Assertion>>,
 }
 
 impl PartialEq for Clause {
@@ -65,24 +63,15 @@ impl Clause {
         generated: Option<bool>,
     ) -> Clause {
         let redefined_vars = WordSet::default();
-        let redefined_var_types = WordMap::default();
         Clause {
             condition_span,
             span,
             wedge: wedge.unwrap_or(false),
             reconcilable: reconcilable.unwrap_or(true),
             generated: generated.unwrap_or(false),
-            hash: get_hash(
-                &possibilities,
-                &redefined_vars,
-                &redefined_var_types,
-                span,
-                wedge.unwrap_or(false),
-                reconcilable.unwrap_or(true),
-            ),
+            hash: get_hash(&possibilities, &redefined_vars, span, wedge.unwrap_or(false), reconcilable.unwrap_or(true)),
             possibilities,
             redefined_vars,
-            redefined_var_types,
         }
     }
 
@@ -98,19 +87,6 @@ impl Clause {
         self
     }
 
-    /// Marks a post-assignment assertion and records the type produced by the
-    /// assignment independently from the condition's truth value.
-    #[inline]
-    #[must_use]
-    pub fn mark_redefined_with_types(mut self, var_id: Word, assigned_types: IndexMap<u64, Assertion>) -> Clause {
-        self.redefined_vars.insert(var_id);
-        if !assigned_types.is_empty() {
-            self.redefined_var_types.insert(var_id, assigned_types);
-        }
-        self.refresh_hash();
-        self
-    }
-
     /// Carries assignment provenance through an algebraic clause rewrite.
     #[inline]
     #[must_use]
@@ -120,26 +96,9 @@ impl Clause {
         self
     }
 
-    /// Carries the assignment result types through an algebraic clause
-    /// rewrite.
-    #[inline]
-    #[must_use]
-    pub fn with_redefined_var_types(mut self, redefined_var_types: WordMap<IndexMap<u64, Assertion>>) -> Clause {
-        self.redefined_var_types = redefined_var_types;
-        self.refresh_hash();
-        self
-    }
-
     #[inline]
     fn refresh_hash(&mut self) {
-        self.hash = get_hash(
-            &self.possibilities,
-            &self.redefined_vars,
-            &self.redefined_var_types,
-            self.span,
-            self.wedge,
-            self.reconcilable,
-        );
+        self.hash = get_hash(&self.possibilities, &self.redefined_vars, self.span, self.wedge, self.reconcilable);
     }
 
     #[inline]
@@ -162,8 +121,7 @@ impl Clause {
                 Some(self.reconcilable),
                 Some(self.generated),
             )
-            .with_redefined_vars(self.redefined_vars.clone())
-            .with_redefined_var_types(self.redefined_var_types.clone()),
+            .with_redefined_vars(self.redefined_vars.clone()),
         )
     }
 
@@ -183,7 +141,6 @@ impl Clause {
             Some(self.generated),
         )
         .with_redefined_vars(self.redefined_vars.clone())
-        .with_redefined_var_types(self.redefined_var_types.clone())
     }
 
     #[inline]
@@ -271,7 +228,6 @@ impl Clause {
 fn get_hash(
     possibilities: &IndexMap<Word, IndexMap<u64, Assertion>>,
     redefined_vars: &WordSet,
-    redefined_var_types: &WordMap<IndexMap<u64, Assertion>>,
     clause_span: Span,
     wedge: bool,
     reconcilable: bool,
@@ -298,14 +254,6 @@ fn get_hash(
         for var_id in redefined_vars {
             var_id.hash(&mut hasher);
             2.hash(&mut hasher);
-
-            if let Some(types) = redefined_var_types.get(&var_id) {
-                let mut type_hashes = types.keys().copied().collect::<Vec<_>>();
-                type_hashes.sort_unstable();
-                for type_hash in type_hashes {
-                    type_hash.hash(&mut hasher);
-                }
-            }
         }
 
         hasher.finish() as u32

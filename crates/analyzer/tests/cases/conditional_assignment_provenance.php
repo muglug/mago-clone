@@ -137,3 +137,30 @@ function elseif_join_retains_cumulative_negations(
     $from->use();
     $to->use();
 }
+
+function assignment_on_one_if_branch_is_not_definite(bool $condition): void
+{
+    if ($condition) {
+        $value = 1;
+    } else {
+        // The other continuing branch does not assign $value.
+    }
+
+    /** @mago-expect analysis:possibly-undefined-variable,mixed-argument */
+    echo $value;
+}
+
+function assignment_on_one_switch_case_is_not_definite(int $selector): void
+{
+    switch ($selector) {
+        case 0:
+            $value = 1;
+            break;
+
+        default:
+            break;
+    }
+
+    /** @mago-expect analysis:possibly-undefined-variable,mixed-argument */
+    echo $value;
+}

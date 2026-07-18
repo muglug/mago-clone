@@ -529,15 +529,9 @@ pub fn find_satisfying_assignments(
 
         let assertions = possible_types.values().cloned().collect::<Vec<_>>();
         let new_truth_index = if clause.redefined_vars.contains(variable_id) {
-            let mut post_assignment_truths = Vec::new();
-            if let Some(assigned_types) = clause.redefined_var_types.get(variable_id) {
-                post_assignment_truths.push(assigned_types.values().cloned().collect());
-            }
-            let new_truth_index = post_assignment_truths.len();
-            post_assignment_truths.push(assertions);
-            truths.insert(*variable_id, post_assignment_truths);
+            truths.insert(*variable_id, vec![assertions]);
             active_truths.shift_remove(variable_id);
-            new_truth_index
+            0
         } else {
             let truth_entry = truths.entry(*variable_id).or_default();
             let new_truth_index = truth_entry.len();
