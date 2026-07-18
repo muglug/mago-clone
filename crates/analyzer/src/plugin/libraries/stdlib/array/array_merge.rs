@@ -68,6 +68,7 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
         let mut merged_value_type: Option<TUnion> = None;
         let mut any_argument_non_empty = false;
         let mut all_arguments_are_lists = true;
+        let mut all_keys_are_integers = true;
         let mut all_lists_are_closed = true;
 
         for invocation_argument in arguments {
@@ -111,11 +112,36 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
 
                         if let Some(items) = keyed.known_items.as_ref() {
                             for (key, value) in items {
-                                merged_items.insert(*key, value.clone());
+                                if key.is_integer() {
+                                    let new_idx = next_list_index;
+                                    next_list_index += 1;
+                                    merged_list_elements.insert(new_idx, value.clone());
+                                } else {
+                                    all_keys_are_integers = false;
+                                    merge_string_item(&mut merged_items, *key, value);
+                                }
                             }
                         }
 
                         if let Some((key_type, value_type)) = &keyed.parameters {
+                            all_lists_are_closed = false;
+                            if !key_type.is_int() {
+                                all_keys_are_integers = false;
+                            }
+
+                            if key_type.has_string() {
+                                for (key, (_, known_value)) in &mut merged_items {
+                                    if key.is_string() {
+                                        *known_value = combine_union_types(
+                                            known_value,
+                                            value_type,
+                                            codebase,
+                                            CombinerOptions::default(),
+                                        );
+                                    }
+                                }
+                            }
+
                             has_parameters = true;
                             merged_key_type = Some(match merged_key_type {
                                 Some(existing) => {
@@ -178,6 +204,10 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
                 }
             } else if let Some((iterable_key, iterable_value)) = get_iterable_parameters(iterable, codebase) {
                 all_arguments_are_lists = false;
+                all_lists_are_closed = false;
+                if !iterable_key.is_int() {
+                    all_keys_are_integers = false;
+                }
                 has_parameters = true;
                 merged_key_type = Some(match merged_key_type {
                     Some(existing) => {
@@ -196,7 +226,7 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
             }
         }
 
-        if all_arguments_are_lists {
+        if all_arguments_are_lists || all_keys_are_integers {
             let element_type =
                 if all_lists_are_closed { get_never() } else { merged_value_type.unwrap_or_else(get_mixed) };
 
@@ -228,4 +258,23 @@ impl FunctionReturnTypeProvider for ArrayMergeProvider {
             Some(TUnion::from_atomic(TAtomic::Array(TArray::Keyed(result_array))))
         }
     }
+}
+
+fn merge_string_item(merged_items: &mut BTreeMap<ArrayKey, (bool, TUnion)>, key: ArrayKey, incoming: &(bool, TUnion)) {
+    let (incoming_optional, incoming_type) = incoming;
+    if !incoming_optional {
+        merged_items.insert(key, (false, incoming_type.clone()));
+        return;
+    }
+
+    let Some((existing_optional, existing_type)) = merged_items.get(&key).cloned() else {
+        merged_items.insert(key, (true, incoming_type.clone()));
+        return;
+    };
+
+    let mut combined = existing_type;
+    combined.types.to_mut().extend(incoming_type.types.iter().cloned());
+    combined.types.to_mut().sort();
+    combined.types.to_mut().dedup();
+    merged_items.insert(key, (existing_optional, combined));
 }

@@ -3426,6 +3426,7 @@ function scandir(string $directory, int $sorting_order = 0, $context = null): ar
 
 /**
  * @return list<non-empty-string>|false
+ * @ignore-falsable-return
  */
 function glob(string $pattern, int $flags = 0): array|false {}
 
@@ -3645,14 +3646,11 @@ function array_values(array $array): array {}
 function array_count_values(array $array): array {}
 
 /**
- * @template K as array-key
- * @template V
+ * @param array<array-key, mixed> $array
+ * @param array-key|null $column_key
+ * @param array-key|null $index_key
  *
- * @param array<array-key, array<K, V>|object>|list<array<K,V>|object> $array
- * @param K|null $column_key
- * @param K|null $index_key
- *
- * @return array<array-key, V>
+ * Precise result types are supplied by the array-column return-type provider.
  *
  * @pure
  */
@@ -3714,12 +3712,13 @@ function array_flip(array $array): array {}
 
 /**
  *
+ * @template K as array-key
  * @template V
  *
- * @param array<string, V> $array
+ * @param array<K, V> $array
  * @param int $case
  *
- * @return ($array is non-empty-array|non-empty-list ? non-empty-array<string, V> : array<string, V>)
+ * @return ($array is non-empty-array|non-empty-list ? non-empty-array<K, V> : array<K, V>)
  *
  * @pure
  */
@@ -3825,7 +3824,7 @@ function array_diff_key(array $array, array ...$arrays): array {}
 function array_diff_assoc(array $array, array ...$arrays): array {}
 
 /**
- * @param array<int|float> $array
+ * @param array<int|float|numeric-string> $array
  *
  * @return ($array is array<int> ? int : float)
  *
@@ -3845,7 +3844,7 @@ function array_product(array $array): int|float {}
  * @template V
  *
  * @param array<K, V> $array
- * @param null|(callable(V, K): bool)|(callable(V): bool)|(callable(K): bool) $callback
+ * @param null|(callable(V, K): mixed)|(callable(V): mixed)|(callable(K): mixed) $callback
  *
  * @return array<K, V>
  */

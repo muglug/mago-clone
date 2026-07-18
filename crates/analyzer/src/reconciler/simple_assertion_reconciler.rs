@@ -1622,9 +1622,22 @@ where
             if !non_empty || min_under_count || known_count.is_none() {
                 existing_var_type.remove_type(atomic);
                 if !element_type.is_never() {
+                    let known_elements = known_elements.clone().or_else(|| {
+                        Some(
+                            (0..count)
+                                .map(|index| (index, (false, (**element_type).clone())))
+                                .collect::<BTreeMap<_, _>>(),
+                        )
+                    });
+                    let exact_element_type = if known_elements.as_ref().is_some_and(|elements| elements.len() == count)
+                    {
+                        Arc::new(get_never())
+                    } else {
+                        Arc::clone(element_type)
+                    };
                     existing_var_type.types.to_mut().push(TAtomic::Array(TArray::List(TList {
-                        element_type: Arc::clone(element_type),
-                        known_elements: known_elements.clone(),
+                        element_type: exact_element_type,
+                        known_elements,
                         known_count: Some(count),
                         non_empty: true,
                     })));
