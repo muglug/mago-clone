@@ -236,6 +236,20 @@ fn parses_assert_method() {
 }
 
 #[test]
+fn parses_assert_static_property() {
+    let arena = LocalArena::new();
+    let document = parse(&arena, b"/** @psalm-assert int self::$value */");
+    let tag = first_tag(&document);
+
+    let TagValue::Assert(assert) = &tag.value else { panic!("got {:?}", tag.value) };
+    let AssertSubject::StaticProperty { class, property, .. } = &assert.subject else {
+        panic!("got {:?}", assert.subject)
+    };
+    assert_eq!(class.value, b"self");
+    assert_eq!(property.value, b"$value");
+}
+
+#[test]
 fn parses_assert_if_true_with_keyword_pattern() {
     let arena = LocalArena::new();
     let document = parse(&arena, b"/** @assert-if-true truthy $foo */");

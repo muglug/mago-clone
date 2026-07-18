@@ -89,5 +89,6 @@ pub fn assertion_subject_word(subject: &AssertSubject<'_>) -> Word {
         AssertSubject::Parameter { variable } => word(variable.value),
         AssertSubject::Method { parameter, method, .. } => concat_word!(parameter.value, b"->", method.value, b"()"),
         AssertSubject::Property { parameter, property, .. } => concat_word!(parameter.value, b"->", property.value),
+        AssertSubject::StaticProperty { class, property, .. } => concat_word!(class.value, b"::", property.value),
     }
 }

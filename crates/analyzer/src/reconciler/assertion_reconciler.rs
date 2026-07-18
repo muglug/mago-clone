@@ -6,12 +6,14 @@ use ryu::Buffer as FloatBuffer;
 
 use mago_allocator::Arena;
 use mago_codex::assertion::Assertion;
+use mago_codex::misc::GenericParent;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
 use mago_codex::ttype::atomic::generic::TGenericParameter;
+use mago_codex::ttype::atomic::iterable::TIterable;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -173,18 +175,13 @@ where
                 continue;
             };
 
-            if !known_items.keys().any(|k| existing_known_items.contains_key(k)) {
-                continue;
-            }
-
             let mut new_known_items = existing_known_items.clone();
-            let mut has_non_optional = false;
             let mut variant_compatible = true;
             for (key, (new_is_optional, new_item_type)) in known_items {
                 if let Some((is_optional, existing_item_type)) = new_known_items.get_mut(key) {
                     match intersect_union_types(new_item_type, existing_item_type, context.codebase) {
                         Some(intersected) if !intersected.is_never() => {
-                            *is_optional = *new_is_optional;
+                            *is_optional = *is_optional && *new_is_optional;
                             *existing_item_type = intersected;
                         }
                         _ => {
@@ -192,10 +189,8 @@ where
                             break;
                         }
                     }
-
-                    if !*new_is_optional {
-                        has_non_optional = true;
-                    }
+                } else {
+                    new_known_items.insert(*key, (*new_is_optional, new_item_type.clone()));
                 }
             }
 
@@ -203,6 +198,7 @@ where
                 continue;
             }
 
+            let has_non_optional = new_known_items.values().any(|(is_optional, _)| !is_optional);
             acceptable_atomic_types.push(TAtomic::Array(TArray::Keyed(TKeyedArray {
                 known_items: Some(new_known_items),
                 parameters: existing_keyed_array.parameters.clone(),
@@ -450,17 +446,21 @@ where
         }
         (TAtomic::Iterable(iterable), object @ TAtomic::Object(TObject::Named(named_object)))
         | (object @ TAtomic::Object(TObject::Named(named_object)), TAtomic::Iterable(iterable))
-            if object.is_traversable(context.codebase)
-                && (named_object.name.as_bytes().eq_ignore_ascii_case(b"Iterator")
-                    || named_object.name.as_bytes().eq_ignore_ascii_case(b"IteratorAggregate")
-                    || named_object.name.as_bytes().eq_ignore_ascii_case(b"Traversable")) =>
+            if object.is_traversable(context.codebase) =>
         {
             let mut object = named_object.clone();
             if object.get_type_parameters().is_none() {
-                object = object.with_type_parameters(Some(vec![
-                    iterable.get_key_type().clone(),
-                    iterable.get_value_type().clone(),
-                ]));
+                if named_object.name.as_bytes().eq_ignore_ascii_case(b"Iterator")
+                    || named_object.name.as_bytes().eq_ignore_ascii_case(b"IteratorAggregate")
+                    || named_object.name.as_bytes().eq_ignore_ascii_case(b"Traversable")
+                {
+                    object = object.with_type_parameters(Some(vec![
+                        iterable.get_key_type().clone(),
+                        iterable.get_value_type().clone(),
+                    ]));
+                }
+            } else if let Some(refined) = intersect_named_object_with_iterable(context, &object, iterable) {
+                object = refined;
             }
 
             return Some(TAtomic::Object(TObject::Named(object)));
@@ -495,6 +495,54 @@ where
     }
 
     None
+}
+
+fn intersect_named_object_with_iterable<A>(
+    context: &mut Context<'_, '_, A>,
+    object: &TNamedObject,
+    iterable: &TIterable,
+) -> Option<TNamedObject>
+where
+    A: Arena,
+{
+    let class_metadata = context.codebase.get_class_like(object.name.as_bytes())?;
+    let traversable = word("traversable");
+    let traversable_metadata = context.codebase.get_class_like(traversable.as_bytes())?;
+    let inherited_parameters = class_metadata.template_extended_parameters.get(&traversable)?;
+    let mut type_parameters = object.get_type_parameters()?.to_vec();
+    let mut refined_any = false;
+
+    for (offset, asserted_type) in [iterable.get_key_type(), iterable.get_value_type()].into_iter().enumerate() {
+        if asserted_type.is_mixed() {
+            continue;
+        }
+
+        let (ancestor_parameter, _) = traversable_metadata.template_types.get_index(offset)?;
+        let inherited_type = inherited_parameters.get(ancestor_parameter)?;
+        if !inherited_type.is_single() {
+            continue;
+        }
+
+        let TAtomic::GenericParameter(TGenericParameter {
+            parameter_name,
+            defining_entity: GenericParent::ClassLike(defining_class),
+            ..
+        }) = inherited_type.get_single()
+        else {
+            continue;
+        };
+
+        if *defining_class != class_metadata.name {
+            continue;
+        }
+
+        let parameter_offset = class_metadata.get_template_index_for_name(*parameter_name)?;
+        let parameter = type_parameters.get_mut(parameter_offset)?;
+        *parameter = intersect_union_with_union(context, parameter, asserted_type)?;
+        refined_any = true;
+    }
+
+    refined_any.then(|| object.clone().with_type_parameters(Some(type_parameters)))
 }
 
 fn intersect_list_arrays<A>(

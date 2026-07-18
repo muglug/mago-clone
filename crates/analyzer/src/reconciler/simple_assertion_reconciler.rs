@@ -659,8 +659,10 @@ where
                     TAtomic::Array(TArray::List(TList::new(element_type)))
                 });
             }
-            TAtomic::Array(TArray::List(_)) => {
-                acceptable_types.push(atomic.clone());
+            TAtomic::Array(TArray::List(list)) => {
+                let mut list = list.clone();
+                list.non_empty |= is_non_empty;
+                acceptable_types.push(TAtomic::Array(TArray::List(list)));
             }
             TAtomic::Iterable(iterable) => {
                 let element_type = iterable.get_value_type();

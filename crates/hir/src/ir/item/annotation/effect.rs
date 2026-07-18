@@ -59,6 +59,7 @@ pub enum AssertAnnotationTargetKind<'arena> {
     Variable(DirectVariable<'arena>),
     Method(DirectVariable<'arena>, Name<'arena>),
     Property(DirectVariable<'arena>, Name<'arena>),
+    StaticProperty(Name<'arena>, DirectVariable<'arena>),
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize))]
@@ -152,6 +153,9 @@ impl CopyInto for AssertAnnotationTargetKind<'_> {
             }
             AssertAnnotationTargetKind::Property(variable, name) => {
                 AssertAnnotationTargetKind::Property(variable.copy_into(arena), name.copy_into(arena))
+            }
+            AssertAnnotationTargetKind::StaticProperty(class, property) => {
+                AssertAnnotationTargetKind::StaticProperty(class.copy_into(arena), property.copy_into(arena))
             }
         }
     }

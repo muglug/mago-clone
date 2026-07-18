@@ -15,22 +15,30 @@ where
         let bang = if self.stream.is_at(TokenKind::Bang) { Some(self.stream.consume_span()?) } else { None };
         let equals = if self.stream.is_at(TokenKind::Equals) { Some(self.stream.consume_span()?) } else { None };
         let pattern = self.parse_assert_pattern()?;
-        let parameter = self.parse_variable()?;
+        let subject = if self.stream.is_at(TokenKind::Identifier) {
+            let class = self.parse_identifier()?;
+            let double_colon = self.stream.eat_span(TokenKind::ColonColon)?;
+            let property = self.parse_variable()?;
 
-        let subject = if self.stream.is_at(TokenKind::Arrow) {
-            let arrow = self.stream.consume_span()?;
-            let member = self.parse_identifier()?;
-
-            if self.stream.is_at(TokenKind::LeftParenthesis) {
-                let left_parenthesis = self.stream.consume_span()?;
-                let right_parenthesis = self.stream.eat_span(TokenKind::RightParenthesis)?;
-
-                AssertSubject::Method { parameter, arrow, method: member, left_parenthesis, right_parenthesis }
-            } else {
-                AssertSubject::Property { parameter, arrow, property: member }
-            }
+            AssertSubject::StaticProperty { class, double_colon, property }
         } else {
-            AssertSubject::Parameter { variable: parameter }
+            let parameter = self.parse_variable()?;
+
+            if self.stream.is_at(TokenKind::Arrow) {
+                let arrow = self.stream.consume_span()?;
+                let member = self.parse_identifier()?;
+
+                if self.stream.is_at(TokenKind::LeftParenthesis) {
+                    let left_parenthesis = self.stream.consume_span()?;
+                    let right_parenthesis = self.stream.eat_span(TokenKind::RightParenthesis)?;
+
+                    AssertSubject::Method { parameter, arrow, method: member, left_parenthesis, right_parenthesis }
+                } else {
+                    AssertSubject::Property { parameter, arrow, property: member }
+                }
+            } else {
+                AssertSubject::Parameter { variable: parameter }
+            }
         };
 
         let description = self.parse_optional_description(false)?;

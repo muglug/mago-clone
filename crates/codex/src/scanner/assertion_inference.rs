@@ -6,6 +6,7 @@ use mago_syntax::cst::Block;
 use mago_syntax::cst::Call;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::FunctionCall;
+use mago_syntax::cst::IfBody;
 use mago_syntax::cst::Literal;
 use mago_syntax::cst::Statement;
 use mago_syntax::cst::UnaryPrefixOperator;
@@ -21,7 +22,7 @@ use crate::ttype::atomic::object::TObject;
 use crate::ttype::atomic::object::named::TNamedObject;
 use crate::ttype::atomic::scalar::TScalar;
 
-type AssertionMap = BTreeMap<Word, Vec<Assertion>>;
+type AssertionMap = BTreeMap<Word, Vec<Vec<Assertion>>>;
 
 /// Infers assertions for a function-like whose body is a single expression
 /// (arrow function).
@@ -61,13 +62,15 @@ pub(super) fn infer_assertions_from_block_body<'arena>(
         return;
     }
 
-    let Some(return_expression) = single_return_expression(body) else {
+    if let Some(return_expression) = single_return_expression(body) {
+        let (if_true, if_false) = infer_from_expression(return_expression, &parameter_names, resolved_names, false);
+
+        apply_assertions(metadata, if_true, if_false);
         return;
-    };
+    }
 
-    let (if_true, if_false) = infer_from_expression(return_expression, &parameter_names, resolved_names, false);
-
-    apply_assertions(metadata, if_true, if_false);
+    let assertions = infer_unconditional_from_terminating_guards(body, &parameter_names, resolved_names);
+    apply_unconditional_assertions(metadata, assertions);
 }
 
 fn has_explicit_assertions(metadata: &FunctionLikeMetadata) -> bool {
@@ -107,6 +110,63 @@ fn apply_assertions(metadata: &mut FunctionLikeMetadata, if_true: AssertionMap, 
     metadata.assertions_inferred = true;
 }
 
+fn apply_unconditional_assertions(metadata: &mut FunctionLikeMetadata, assertions: AssertionMap) {
+    if assertions.is_empty() {
+        return;
+    }
+
+    for (var, assertions) in assertions {
+        metadata.assertions.entry(var).or_default().extend(assertions);
+    }
+
+    metadata.assertions_inferred = true;
+}
+
+fn infer_unconditional_from_terminating_guards<'arena>(
+    body: &'arena Block<'arena>,
+    parameter_names: &WordSet,
+    resolved_names: &ResolvedNames<'arena>,
+) -> AssertionMap {
+    let mut assertions = AssertionMap::new();
+
+    for statement in &body.statements {
+        let Statement::If(guard) = statement else {
+            continue;
+        };
+
+        let IfBody::Statement(guard_body) = &guard.body else {
+            continue;
+        };
+
+        if !guard_body.else_if_clauses.is_empty()
+            || guard_body.else_clause.is_some()
+            || !statement_always_terminates(guard_body.statement)
+        {
+            continue;
+        }
+
+        let (_, if_false) = infer_from_expression(guard.condition, parameter_names, resolved_names, false);
+        merge_assertion_maps(&mut assertions, if_false);
+    }
+
+    assertions
+}
+
+fn statement_always_terminates(statement: &Statement<'_>) -> bool {
+    match statement {
+        Statement::Return(_) => true,
+        Statement::Expression(statement) => matches!(unwrap_parens(statement.expression), Expression::Throw(_)),
+        Statement::Block(block) => block.statements.as_slice().last().is_some_and(statement_always_terminates),
+        _ => false,
+    }
+}
+
+fn merge_assertion_maps(target: &mut AssertionMap, incoming: AssertionMap) {
+    for (variable, clauses) in incoming {
+        target.entry(variable).or_default().extend(clauses);
+    }
+}
+
 fn infer_from_expression<'arena>(
     expression: &'arena Expression<'arena>,
     parameter_names: &WordSet,
@@ -120,6 +180,20 @@ fn infer_from_expression<'arena>(
             infer_from_expression(unary.operand, parameter_names, resolved_names, !negated)
         }
         Expression::Binary(binary) => match &binary.operator {
+            BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {
+                let (left_true, _) = infer_from_expression(binary.lhs, parameter_names, resolved_names, false);
+                let (right_true, _) = infer_from_expression(binary.rhs, parameter_names, resolved_names, false);
+                let mut if_true = left_true;
+                merge_assertion_maps(&mut if_true, right_true);
+                if negated { (AssertionMap::new(), if_true) } else { (if_true, AssertionMap::new()) }
+            }
+            BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => {
+                let (_, left_false) = infer_from_expression(binary.lhs, parameter_names, resolved_names, false);
+                let (_, right_false) = infer_from_expression(binary.rhs, parameter_names, resolved_names, false);
+                let mut if_false = left_false;
+                merge_assertion_maps(&mut if_false, right_false);
+                if negated { (if_false, AssertionMap::new()) } else { (AssertionMap::new(), if_false) }
+            }
             BinaryOperator::Instanceof(_) => parse_instanceof(binary.lhs, binary.rhs, parameter_names, resolved_names)
                 .map(|(var, atomic)| build_assertions(var, atomic, negated))
                 .unwrap_or_default(),
@@ -147,11 +221,11 @@ fn build_assertions(var: Word, atomic: TAtomic, negated: bool) -> (AssertionMap,
     let mut if_false = AssertionMap::new();
 
     if negated {
-        if_true.insert(var, vec![Assertion::IsNotType(atomic.clone())]);
-        if_false.insert(var, vec![Assertion::IsType(atomic)]);
+        if_true.insert(var, vec![vec![Assertion::IsNotType(atomic.clone())]]);
+        if_false.insert(var, vec![vec![Assertion::IsType(atomic)]]);
     } else {
-        if_true.insert(var, vec![Assertion::IsType(atomic.clone())]);
-        if_false.insert(var, vec![Assertion::IsNotType(atomic)]);
+        if_true.insert(var, vec![vec![Assertion::IsType(atomic.clone())]]);
+        if_false.insert(var, vec![vec![Assertion::IsNotType(atomic)]]);
     }
 
     (if_true, if_false)

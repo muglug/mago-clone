@@ -88,7 +88,7 @@ where
             ..
         } = target
         {
-            Some(metadata.original_name)
+            Some(metadata.name)
         } else {
             None
         }

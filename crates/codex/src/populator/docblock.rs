@@ -418,8 +418,9 @@ fn apply_inheritance_work(codebase: &mut CodebaseMetadata, mut inheritance_work:
                 || !parent_if_false_assertions.is_empty();
             let child_assertions_are_inferred = child_method.assertions_inferred;
 
-            let child_assertions_overridable =
-                |child: &BTreeMap<Word, Vec<Assertion>>| -> bool { child.is_empty() || child_assertions_are_inferred };
+            let child_assertions_overridable = |child: &BTreeMap<Word, Vec<Vec<Assertion>>>| -> bool {
+                child.is_empty() || child_assertions_are_inferred
+            };
 
             let should_inherit_assertions =
                 child_assertions_overridable(&child_method.assertions) && !parent_assertions.is_empty();
@@ -446,12 +447,17 @@ fn apply_inheritance_work(codebase: &mut CodebaseMetadata, mut inheritance_work:
             if should_inherit_templates { Some(parent_template_types.clone()) } else { None };
         let parent_thrown_to_apply = if should_inherit_thrown { Some(substituted_thrown_types) } else { None };
 
-        let resolve_assertions = |assertions: &BTreeMap<Word, Vec<Assertion>>| {
+        let resolve_assertions = |assertions: &BTreeMap<Word, Vec<Vec<Assertion>>>| {
             assertions
                 .iter()
                 .map(|(name, assertions)| {
                     let resolved = if let Some(template_result) = template_result.as_ref() {
-                        assertions.iter().flat_map(|a| a.resolve_templates(codebase, template_result)).collect()
+                        assertions
+                            .iter()
+                            .map(|clause| {
+                                clause.iter().flat_map(|a| a.resolve_templates(codebase, template_result)).collect()
+                            })
+                            .collect()
                     } else {
                         assertions.clone()
                     };

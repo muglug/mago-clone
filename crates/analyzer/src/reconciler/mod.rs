@@ -325,7 +325,16 @@ pub fn reconcile_keyed_types<'ctx, A>(
         }
 
         if !has_object_array_access {
-            block_context.locals.insert(*key, Rc::new(result_type));
+            let result_type = Rc::new(result_type);
+            block_context.locals.insert(*key, Rc::clone(&result_type));
+
+            if key_parts.len() == 1
+                && let Some(references) = reference_graph.get(key)
+            {
+                for reference in references {
+                    block_context.locals.insert(*reference, Rc::clone(&result_type));
+                }
+            }
         }
 
         let key_parts_0_atom = word(&key_parts[0]);

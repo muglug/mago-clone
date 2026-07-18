@@ -1150,6 +1150,10 @@ impl<'ir, 'arena, I, S, E> Node<'ir, 'arena, I, S, E> {
                     f(Node::DirectVariable(variable));
                     f(Node::Name(name));
                 }
+                AssertAnnotationTargetKind::StaticProperty(class, property) => {
+                    f(Node::Name(class));
+                    f(Node::DirectVariable(property));
+                }
             },
             Self::SelfOutAnnotation(node) => f(Node::TypeAnnotation(node.r#type)),
             Self::AssignmentOperator(_)

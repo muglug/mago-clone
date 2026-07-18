@@ -25,6 +25,11 @@ pub enum AssertSubject<'arena> {
         arrow: Span,
         property: Identifier<'arena>,
     },
+    StaticProperty {
+        class: Identifier<'arena>,
+        double_colon: Span,
+        property: Variable<'arena>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
@@ -68,6 +73,12 @@ impl AssertTagValue<'_> {
 
     #[inline]
     #[must_use]
+    pub const fn is_subject_static_property(&self) -> bool {
+        matches!(self.subject, AssertSubject::StaticProperty { .. })
+    }
+
+    #[inline]
+    #[must_use]
     pub const fn is_negated(&self) -> bool {
         self.bang.is_some()
     }
@@ -85,6 +96,7 @@ impl HasSpan for AssertSubject<'_> {
             AssertSubject::Parameter { variable } => variable.span(),
             AssertSubject::Method { parameter, right_parenthesis, .. } => parameter.span().join(*right_parenthesis),
             AssertSubject::Property { parameter, property, .. } => parameter.span().join(property.span()),
+            AssertSubject::StaticProperty { class, property, .. } => class.span().join(property.span()),
         }
     }
 }

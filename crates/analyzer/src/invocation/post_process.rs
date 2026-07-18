@@ -255,7 +255,7 @@ fn apply_assertion_to_call_context<'ctx, 'arena, A>(
     artifacts: &AnalysisArtifacts,
     invocation: &Invocation<'ctx, '_, 'arena>,
     this_variable: Option<&[u8]>,
-    assertions: &BTreeMap<Word, Conjunction<Assertion>>,
+    assertions: &BTreeMap<Word, AssertionSet>,
     template_result: &TemplateResult,
     parameters: &WordMap<TUnion>,
 ) where
@@ -1019,6 +1019,46 @@ fn resolve_invocation_assertion<'ctx, 'arena, A>(
     artifacts: &AnalysisArtifacts,
     invocation: &Invocation<'ctx, '_, 'arena>,
     this_variable: Option<&[u8]>,
+    assertions: &BTreeMap<Word, AssertionSet>,
+    template_result: &TemplateResult,
+    parameters: &WordMap<TUnion>,
+    is_unconditional_assert: bool,
+) -> IndexMap<Word, AssertionSet>
+where
+    A: Arena,
+{
+    let mut resolved = IndexMap::<Word, AssertionSet>::new();
+
+    for (subject, clauses) in assertions {
+        for clause in clauses {
+            let clause_map = BTreeMap::from([(*subject, clause.clone())]);
+            let clause_result = resolve_invocation_assertion_clause(
+                context,
+                block_context,
+                artifacts,
+                invocation,
+                this_variable,
+                &clause_map,
+                template_result,
+                parameters,
+                is_unconditional_assert,
+            );
+
+            for (variable, assertion_set) in clause_result {
+                resolved.entry(variable).or_default().extend(assertion_set);
+            }
+        }
+    }
+
+    resolved
+}
+
+fn resolve_invocation_assertion_clause<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &mut BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
+    invocation: &Invocation<'ctx, '_, 'arena>,
+    this_variable: Option<&[u8]>,
     assertions: &BTreeMap<Word, Conjunction<Assertion>>,
     template_result: &TemplateResult,
     parameters: &WordMap<TUnion>,
@@ -1406,17 +1446,22 @@ fn resolve_special_assertion_target(
         let mut out: Vec<u8> = Vec::with_capacity(target_bytes.len() - 5 + this_variable.len());
         out.extend_from_slice(this_variable);
         out.extend_from_slice(&target_bytes[5..]);
-        return Some(Word::from(out.as_slice()));
+        return Some(canonicalize_assertion_call_segments(Word::from(out.as_slice())));
     }
 
     if let Some(class) = block_context.scope.get_class_like_name()
-        && target_bytes.starts_with(b"self::")
+        && let Some(suffix) = target_bytes.strip_prefix(b"self::").or_else(|| target_bytes.strip_prefix(b"static::"))
     {
         let class_bytes = class.as_bytes();
-        let mut out: Vec<u8> = Vec::with_capacity(target_bytes.len() - 6 + class_bytes.len());
+        let mut out: Vec<u8> = Vec::with_capacity(class_bytes.len() + 2 + suffix.len());
         out.extend_from_slice(class_bytes);
-        out.extend_from_slice(&target_bytes[6..]);
+        out.extend_from_slice(b"::");
+        out.extend_from_slice(suffix);
         return Some(Word::from(out.as_slice()));
+    }
+
+    if !target_bytes.starts_with(b"$") && memchr::memmem::find(target_bytes, b"::$").is_some() {
+        return Some(target_name);
     }
 
     None
@@ -1456,18 +1501,24 @@ where
         return (None, None);
     }
 
-    // Step 1: Ensure we have both the name and offset for the parameter.
-    if parameter_name.is_none() {
+    let assertion_target = parameter_name;
+
+    // Step 1: Resolve the assertion target's root parameter and offset.
+    if assertion_target.is_none() {
         if let Some(parameter_ref) = parameter_offset.and_then(|offset| invocation.target.get_parameter(offset)) {
             parameter_name = parameter_ref.get_name().map(|name| name.0);
         }
     } else if parameter_offset.is_none()
-        && let Some(name) = parameter_name
+        && let Some(target) = assertion_target
     {
-        parameter_offset = invocation
-            .target
-            .iter_parameters()
-            .position(|parameter| parameter.get_name().is_some_and(|name_variable| name_variable.0 == name));
+        parameter_offset = invocation.target.iter_parameters().position(|parameter| {
+            parameter.get_name().is_some_and(|parameter_name| assertion_targets_parameter(target, parameter_name.0))
+        });
+
+        parameter_name = parameter_offset
+            .and_then(|offset| invocation.target.get_parameter(offset))
+            .and_then(|parameter| parameter.get_name())
+            .map(|name| name.0);
     } else {
         // both name and offset already known; nothing to fill in
     }
@@ -1539,7 +1590,70 @@ where
         }
     };
 
+    let argument_id = match (assertion_target, parameter_name, argument_id) {
+        (Some(target), Some(parameter), Some(argument)) => {
+            map_assertion_target_to_argument(target, parameter, argument)
+        }
+        (_, _, argument_id) => argument_id,
+    };
+
     (Some(argument_expression), argument_id)
+}
+
+fn assertion_targets_parameter(assertion_target: Word, parameter_name: Word) -> bool {
+    let assertion = assertion_target.as_bytes().strip_prefix(b"$").unwrap_or(assertion_target.as_bytes());
+    let parameter = parameter_name.as_bytes().strip_prefix(b"$").unwrap_or(parameter_name.as_bytes());
+
+    if assertion == parameter {
+        return true;
+    }
+
+    assertion
+        .strip_prefix(parameter)
+        .is_some_and(|suffix| suffix.starts_with(b"->") || suffix.starts_with(b"::") || suffix.first() == Some(&b'['))
+}
+
+fn map_assertion_target_to_argument(assertion_target: Word, parameter_name: Word, argument: Word) -> Option<Word> {
+    let assertion = assertion_target.as_bytes().strip_prefix(b"$").unwrap_or(assertion_target.as_bytes());
+    let parameter = parameter_name.as_bytes().strip_prefix(b"$").unwrap_or(parameter_name.as_bytes());
+    let suffix = assertion.strip_prefix(parameter)?;
+
+    if suffix.is_empty() {
+        return Some(argument);
+    }
+
+    if !(suffix.starts_with(b"->") || suffix.starts_with(b"::") || suffix.first() == Some(&b'[')) {
+        return None;
+    }
+
+    let mut mapped = Vec::with_capacity(argument.len() + suffix.len());
+    mapped.extend_from_slice(argument.as_bytes());
+    mapped.extend_from_slice(suffix);
+
+    Some(canonicalize_assertion_call_segments(Word::from(mapped.as_slice())))
+}
+
+fn canonicalize_assertion_call_segments(target: Word) -> Word {
+    let bytes = target.as_bytes();
+    if !bytes.ends_with(b"()") {
+        return target;
+    }
+
+    let mut result = Vec::with_capacity(bytes.len());
+    for (index, segment) in bytes.split(|byte| *byte == b'>').enumerate() {
+        if index > 0 {
+            result.push(b'>');
+        }
+
+        if let Some(method) = segment.strip_suffix(b"()") {
+            result.extend(method.iter().map(u8::to_ascii_lowercase));
+            result.extend_from_slice(b"()");
+        } else {
+            result.extend_from_slice(segment);
+        }
+    }
+
+    Word::from(result.as_slice())
 }
 
 fn collect_plugin_throw_types<'ctx, 'arena, A>(
@@ -1603,13 +1717,17 @@ fn apply_plugin_assertions<'ctx, 'arena, A>(
         return;
     };
 
+    let if_true = canonicalize_provider_assertions(&assertions.if_true);
+    let if_false = canonicalize_provider_assertions(&assertions.if_false);
+    let immediate = canonicalize_provider_assertions(&assertions.type_assertions);
+
     let resolved_if_true_assertions = resolve_invocation_assertion(
         context,
         block_context,
         artifacts,
         invocation,
         this_variable,
-        &assertions.if_true,
+        &if_true,
         template_result,
         parameters,
         false,
@@ -1625,7 +1743,7 @@ fn apply_plugin_assertions<'ctx, 'arena, A>(
         artifacts,
         invocation,
         this_variable,
-        &assertions.if_false,
+        &if_false,
         template_result,
         parameters,
         false,
@@ -1641,8 +1759,20 @@ fn apply_plugin_assertions<'ctx, 'arena, A>(
         artifacts,
         invocation,
         this_variable,
-        &assertions.type_assertions,
+        &immediate,
         template_result,
         parameters,
     );
+}
+
+fn canonicalize_provider_assertions(
+    assertions: &BTreeMap<Word, Conjunction<Assertion>>,
+) -> BTreeMap<Word, AssertionSet> {
+    assertions
+        .iter()
+        .map(|(variable, conjunction)| {
+            let clauses = conjunction.iter().cloned().map(|assertion| vec![assertion]).collect();
+            (*variable, clauses)
+        })
+        .collect()
 }
