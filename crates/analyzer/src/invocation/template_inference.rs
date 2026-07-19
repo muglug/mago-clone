@@ -173,7 +173,15 @@ fn infer_templates_from_input_and_container_types<A>(
     for container_atomic_part in &generic_container_parts {
         match container_atomic_part {
             TAtomic::Array(container_array) => {
-                for input_atomic in residual_input_type.types.as_ref() {
+                // A generic argument is not merely its constraint, but its
+                // constraint still exposes the structure needed to infer
+                // nested provider templates. For example, matching `TArray`
+                // as `array<TKey, bool>` against `array<K, V>` should infer
+                // `K = TKey`, not widen it to `array-key`.
+                for input_atomic in residual_input_type.types.iter().flat_map(|input_atomic| match input_atomic {
+                    TAtomic::GenericParameter(parameter) => parameter.constraint.types.iter(),
+                    _ => std::slice::from_ref(input_atomic).iter(),
+                }) {
                     if let TAtomic::Array(input_array) = input_atomic {
                         match (container_array, input_array) {
                             (TArray::List(container_list), TArray::List(input_list)) => {

@@ -265,6 +265,43 @@ pub fn get_union_from_type(
             return Err(TypeError::UnsupportedType(ttype.to_string(), ttype.span()));
         }
         Type::MemberReference(member_reference) => {
+            // Psalm's `T::class` spelling is equivalent to
+            // `class-string<T>`. Resolve the left-hand identifier as a
+            // template before treating it as a namespaced class name.
+            if let ReferenceKind::Identifier(identifier) = &member_reference.kind
+                && let MemberReferenceSelector::Identifier(member) = member_reference.member
+                && member.value.eq_ignore_ascii_case(b"class")
+            {
+                let parameter_name = word(identifier.value);
+                if let Some(defining_entities) = type_context.get_template_definition(parameter_name) {
+                    let TAtomic::GenericParameter(TGenericParameter {
+                        parameter_name,
+                        defining_entity,
+                        constraint,
+                        ..
+                    }) = get_template_atomic(defining_entities, parameter_name)
+                    else {
+                        unreachable!("template definitions always build generic parameters");
+                    };
+
+                    let class_strings = constraint
+                        .types
+                        .iter()
+                        .cloned()
+                        .map(|constraint| {
+                            TAtomic::Scalar(TScalar::ClassLikeString(TClassLikeString::generic(
+                                TClassLikeStringKind::Class,
+                                parameter_name,
+                                defining_entity,
+                                constraint,
+                            )))
+                        })
+                        .collect();
+
+                    return Ok(TUnion::from_vec(class_strings));
+                }
+            }
+
             let class_like_name = match &member_reference.kind {
                 ReferenceKind::Self_(_) | ReferenceKind::Static(_) => {
                     let Some(classname) = classname else {

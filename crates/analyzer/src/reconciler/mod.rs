@@ -1508,7 +1508,17 @@ fn map_generic_constraint<F>(generic_parameter: &TGenericParameter, f: F) -> Opt
 where
     F: FnOnce(&TUnion) -> TUnion,
 {
-    let parameter = generic_parameter.with_constraint(f(&generic_parameter.constraint));
+    let reconciled_constraint = f(&generic_parameter.constraint);
+
+    // If reconciliation eliminates every arm except another template, that
+    // inner template is the precise surviving type. Retaining the outer
+    // parameter as `T extends U` obscures the relationship from nested
+    // generic comparison (for example `Promise<T>` versus `Promise<U>`).
+    if let TAtomic::GenericParameter(surviving_parameter) = reconciled_constraint.get_single() {
+        return Some(TAtomic::GenericParameter(surviving_parameter.clone()));
+    }
+
+    let parameter = generic_parameter.with_constraint(reconciled_constraint);
 
     if parameter.constraint.is_never() { None } else { Some(TAtomic::GenericParameter(parameter)) }
 }

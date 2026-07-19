@@ -189,7 +189,9 @@ impl ResolvedClassname {
                 if codebase.symbols.contains_enum(lowercase_fqcn) {
                     TObject::Enum(TEnum::new(fqcn))
                 } else {
-                    TObject::Named(TNamedObject::new(fqcn))
+                    let mut object = TNamedObject::new(fqcn);
+                    object.is_static = self.is_static();
+                    TObject::Named(object)
                 }
             }
             None => TObject::Any,
@@ -470,9 +472,24 @@ pub fn get_class_name_from_atomic(codebase: &CodebaseMetadata, atomic: &TAtomic)
                     TClassLikeString::Any { .. } => {
                         ResolvedClassname::new(None, ResolutionOrigin::AnyClassString, false)
                     }
-                    TClassLikeString::OfType { constraint, .. } | TClassLikeString::Generic { constraint, .. } => {
+                    TClassLikeString::OfType { constraint, .. } => {
                         // This is a `class-string<T>`. We resolve `T` to get the class name.
                         get_class_name_from_atomic_impl(codebase, constraint.as_ref(), Some(class_string))?
+                    }
+                    TClassLikeString::Generic { constraint, .. } => {
+                        // A template may be constrained by an iterable or an
+                        // intersection rather than a single named object. The
+                        // concrete class is unknown, but the class-string is
+                        // still valid and instantiation must preserve the
+                        // generic parameter for downstream analysis.
+                        get_class_name_from_atomic_impl(codebase, constraint.as_ref(), Some(class_string))
+                            .unwrap_or_else(|| {
+                                ResolvedClassname::new(
+                                    None,
+                                    ResolutionOrigin::SpecificClassLikeString(class_string.clone()),
+                                    false,
+                                )
+                            })
                     }
                     TClassLikeString::Literal { value } => ResolvedClassname::new(
                         Some(*value),

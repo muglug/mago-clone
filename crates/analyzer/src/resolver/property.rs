@@ -643,11 +643,21 @@ where
             self_class: Some(declaring_class_id),
             static_class_type: StaticClassType::Object(object.clone()),
             parent_class: declaring_class_metadata.direct_parent_class,
+            // Keep class templates intact until they have been localized to
+            // the receiver below. Expanding the declaration first replaces
+            // `T` with its constraint and permanently loses relationships
+            // such as a property read followed by `T[K]`.
+            expand_templates: false,
             ..Default::default()
         },
     );
 
+    let is_unparameterized_direct_this = matches!(object_expr, Expression::Variable(Variable::Direct(var)) if var.name == b"$this")
+        && block_context.scope.get_class_like_name() == Some(declaring_class_id)
+        && class_id == declaring_class_id;
+
     if !declaring_class_metadata.template_types.is_empty()
+        && !is_unparameterized_direct_this
         && let TObject::Named(named_object) = object
     {
         property_type = localize_property_type(
@@ -766,7 +776,14 @@ fn update_template_types<A>(
                             expander::expand_union(
                                 context.codebase,
                                 &mut lhs_param_type,
-                                &TypeExpansionOptions { parent_class: None, ..Default::default() },
+                                &TypeExpansionOptions {
+                                    parent_class: None,
+                                    // Preserve an unresolved receiver template;
+                                    // its constraint is not a concrete property
+                                    // specialization.
+                                    expand_templates: false,
+                                    ..Default::default()
+                                },
                             );
 
                             lhs_param_type

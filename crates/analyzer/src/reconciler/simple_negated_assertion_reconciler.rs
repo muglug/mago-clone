@@ -182,7 +182,8 @@ where
                 ));
             }
             TAtomic::Array(TArray::Keyed(TKeyedArray { known_items: None, parameters: Some(parameters), .. }))
-                if parameters.0.is_placeholder() && parameters.1.is_placeholder() =>
+                if (parameters.0.is_placeholder() && parameters.1.is_placeholder())
+                    || (parameters.0.is_array_key() && parameters.1.is_mixed()) =>
             {
                 return Some(subtract_keyed_array(
                     context,
@@ -559,6 +560,32 @@ where
             did_remove_type = true;
 
             if is_equality {
+                acceptable_types.push(atomic);
+            }
+        } else if let TAtomic::Array(TArray::List(_)) = &atomic {
+            // A list is still an array. Assertions such as `is_array()` are
+            // represented by the general keyed-array atomic, so their
+            // negation must also subtract list constraints. Keeping the list
+            // here can make a generic `T as string|list<mixed>` reconcile to
+            // an impossible type on the false branch.
+            let assertion_union = TUnion::from_atomic(assertion.get_type().expect("array assertion").clone());
+            let input_union = TUnion::from_atomic(atomic.clone());
+            let list_is_covered = union_comparator::is_contained_by(
+                context.codebase,
+                &input_union,
+                &assertion_union,
+                false,
+                false,
+                true,
+                &mut mago_codex::ttype::comparator::ComparisonResult::new(),
+            );
+
+            if list_is_covered {
+                did_remove_type = true;
+                if is_equality {
+                    acceptable_types.push(atomic);
+                }
+            } else {
                 acceptable_types.push(atomic);
             }
         } else {

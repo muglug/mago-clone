@@ -159,6 +159,24 @@ where
         return existing_var_type.clone();
     }
 
+    // An assertion against an unresolved template is stronger than an
+    // assertion against the template's constraint. Keep the template identity
+    // while narrowing its constraint to the values that were possible before
+    // the assertion. This is important for assertion contracts on generic
+    // receivers: `@assert T $value` must leave `$value` as `T`, not merely as
+    // the scalar/object union it had at the call site.
+    if let TAtomic::GenericParameter(parameter) = new_type {
+        let Some(constraint) = intersect_union_types(&parameter.constraint, existing_var_type, context.codebase) else {
+            return get_never();
+        };
+
+        if constraint.is_never() {
+            return get_never();
+        }
+
+        return wrap_atomic(TAtomic::GenericParameter(parameter.with_constraint(constraint)));
+    }
+
     if let TAtomic::Array(TArray::Keyed(TKeyedArray {
         known_items: Some(known_items),
         non_empty: new_type_non_empty,

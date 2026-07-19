@@ -163,11 +163,12 @@ where
     }
 
     if let Some(object_type) = artifacts.get_expression_type(object) {
-        let mut object_atomics = object_type.types.iter().collect::<Vec<_>>();
+        let mut object_atomics = object_type.types.iter().cloned().map(|atomic| (atomic, None)).collect::<Vec<_>>();
 
-        while let Some(object_atomic) = object_atomics.pop() {
-            if let TAtomic::GenericParameter(TGenericParameter { constraint, .. }) = object_atomic {
-                object_atomics.extend(constraint.types.iter());
+        while let Some((object_atomic, generic_receiver)) = object_atomics.pop() {
+            if let TAtomic::GenericParameter(parameter) = &object_atomic {
+                object_atomics
+                    .extend(parameter.constraint.types.iter().cloned().map(|atomic| (atomic, Some(parameter.clone()))));
                 continue;
             }
 
@@ -204,18 +205,18 @@ where
                 continue;
             }
 
-            let TAtomic::Object(obj_type) = object_atomic else {
+            let TAtomic::Object(obj_type) = &object_atomic else {
                 if object_atomic.is_mixed() {
                     result.encountered_mixed = true;
                 } else {
                     result.has_invalid_target = true;
                 }
 
-                report_call_on_non_object(context, object_atomic, object.span(), selector.span());
+                report_call_on_non_object(context, &object_atomic, object.span(), selector.span());
                 continue;
             };
 
-            let resolved_magic_call_method = resolve_method_from_object(
+            let mut resolved_magic_call_method = resolve_method_from_object(
                 context,
                 block_context,
                 object,
@@ -226,10 +227,15 @@ where
                 true,
                 &mut result,
             );
+            if let Some(generic_receiver) = &generic_receiver {
+                for resolved in &mut resolved_magic_call_method {
+                    resolved.static_class_type = StaticClassType::Generic(generic_receiver.clone());
+                }
+            }
 
             let mut had_undocumented_magic_call = false;
             for &method_name in &method_names {
-                let resolved_methods = resolve_method_from_object(
+                let mut resolved_methods = resolve_method_from_object(
                     context,
                     block_context,
                     object,
@@ -240,6 +246,11 @@ where
                     !resolved_magic_call_method.is_empty(),
                     &mut result,
                 );
+                if let Some(generic_receiver) = &generic_receiver {
+                    for resolved in &mut resolved_methods {
+                        resolved.static_class_type = StaticClassType::Generic(generic_receiver.clone());
+                    }
+                }
 
                 if resolved_methods.is_empty() {
                     if let Some(classname) = obj_type.get_name() {

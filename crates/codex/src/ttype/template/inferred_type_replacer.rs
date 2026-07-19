@@ -46,11 +46,13 @@ pub fn replace_with_polarity(
     polarity: Variance,
 ) -> TUnion {
     let mut new_types = Vec::new();
+    let mut replaced_template = false;
 
     for atomic_type in union.types.as_ref() {
         if let TAtomic::Conditional(conditional) = atomic_type
             && let Some(resolved) = replace_conditional(conditional, template_result, codebase, polarity)
         {
+            replaced_template = true;
             new_types.extend(resolved.types.into_owned());
             continue;
         }
@@ -93,6 +95,7 @@ pub fn replace_with_polarity(
                 );
 
                 if let Some(template_type) = template_type {
+                    replaced_template = true;
                     new_types.extend(template_type.types.into_owned());
                 } else {
                     new_types.push(atomic_type);
@@ -143,6 +146,7 @@ pub fn replace_with_polarity(
                     }
 
                     if !class_template_types.is_empty() {
+                        replaced_template = true;
                         new_types.extend(class_template_types);
                     } else {
                         new_types.push(atomic_type);
@@ -161,7 +165,13 @@ pub fn replace_with_polarity(
         return get_never();
     }
 
-    union.clone_with_types(combiner::combine(new_types, codebase, combiner::CombinerOptions::default()))
+    let mut replaced =
+        union.clone_with_types(combiner::combine(new_types, codebase, combiner::CombinerOptions::default()));
+    if replaced_template {
+        replaced.set_had_template(true);
+    }
+
+    replaced
 }
 
 /// Resolve an inferred-template conditional at the substitution layer.

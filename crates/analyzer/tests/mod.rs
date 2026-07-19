@@ -100,6 +100,7 @@ test_case!(array_provider_precision);
 test_case!(assertion_contract_paths);
 test_case!(repeated_guarded_expression_advice);
 test_case!(pzoom_assertion_alignment);
+test_case!(template_substitution_alignment);
 test_case!(arrays_max_on_possibly_empty);
 test_case!(arrays_min_on_possibly_empty);
 test_case!(arrays_array_pop);

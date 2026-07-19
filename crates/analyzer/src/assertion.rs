@@ -956,11 +956,25 @@ where
     let right_class_part = is_class_constant_access(right);
     let left_get_class_argument = get_get_class_argument(left, assertion_context);
     let right_get_class_argument = get_get_class_argument(right, assertion_context);
+    let left_is_class_string = artifacts
+        .get_expression_type(left)
+        .is_some_and(|ty| ty.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_)))));
+    let right_is_class_string = artifacts
+        .get_expression_type(right)
+        .is_some_and(|ty| ty.types.iter().any(|atomic| matches!(atomic, TAtomic::Scalar(TScalar::ClassLikeString(_)))));
 
     let (variable_expr, class_name_expr) =
         if let (Some(variable), Some(_)) = (left_get_class_argument, right_class_part) {
             (variable, right)
         } else if let (Some(variable), Some(_)) = (right_get_class_argument, left_class_part) {
+            (variable, left)
+        } else if let Some(variable) = left_get_class_argument
+            && right_is_class_string
+        {
+            (variable, right)
+        } else if let Some(variable) = right_get_class_argument
+            && left_is_class_string
+        {
             (variable, left)
         } else {
             match (left_class_part, right_class_part) {

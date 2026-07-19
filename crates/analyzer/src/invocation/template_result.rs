@@ -146,10 +146,21 @@ pub fn populate_template_result_from_invocation<'ctx, 'arena, A>(
     // parameters of `class_like_metadata` live on the mixin object.
     let instance_type = if let Some(declaring_object) = &method_context.declaring_object_type {
         declaring_object
-    } else if let StaticClassType::Object(TObject::Named(instance_type)) = &method_context.class_type {
-        instance_type
     } else {
-        return;
+        match &method_context.class_type {
+            StaticClassType::Object(TObject::Named(instance_type)) => instance_type,
+            StaticClassType::Generic(parameter) => {
+                let Some(instance_type) = parameter.constraint.types.iter().find_map(|atomic| match atomic {
+                    mago_codex::ttype::atomic::TAtomic::Object(TObject::Named(instance_type)) => Some(instance_type),
+                    _ => None,
+                }) else {
+                    return;
+                };
+
+                instance_type
+            }
+            _ => return,
+        }
     };
 
     if let Some(type_parameters) = &instance_type.type_parameters {
