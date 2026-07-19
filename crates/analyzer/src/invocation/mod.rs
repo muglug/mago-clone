@@ -49,6 +49,9 @@ pub struct Invocation<'ctx, 'ast, 'arena> {
     pub arguments_source: InvocationArgumentsSource<'ast, 'arena>,
     /// The source span of the entire invocation.
     pub span: Span,
+    /// The argument count is invalid for this target but valid for another
+    /// possible runtime target of the same call.
+    pub argument_count_mismatch_is_possible: bool,
 }
 
 /// Context information for method call resolution.
@@ -159,7 +162,13 @@ pub struct InvocationTargetParametersIter<'target, 'ctx> {
 
 impl<'ctx, 'ast, 'arena> Invocation<'ctx, 'ast, 'arena> {
     pub fn new(target: InvocationTarget<'ctx>, arguments: InvocationArgumentsSource<'ast, 'arena>, span: Span) -> Self {
-        Self { target, arguments_source: arguments, span }
+        Self { target, arguments_source: arguments, span, argument_count_mismatch_is_possible: false }
+    }
+
+    #[inline]
+    pub fn with_possible_argument_count_mismatch(mut self, is_possible: bool) -> Self {
+        self.argument_count_mismatch_is_possible = is_possible;
+        self
     }
 }
 

@@ -1348,25 +1348,6 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
                     break 'parameters None;
                 }
 
-                let is_iterator_interface = name == iterator || name == traversable || name == iterator_aggregate;
-                if !is_iterator_interface
-                    && codebase.is_instance_of(class_metadata.name.as_bytes(), iterator.as_bytes())
-                    && let (Some(key_type), Some(value_type)) = (
-                        get_iterator_method_return_type(codebase, name, b"key"),
-                        get_iterator_method_return_type(codebase, name, b"current"),
-                    )
-                {
-                    let contains_generic_param = |t: &TUnion| t.types.iter().any(atomic::TAtomic::is_generic_parameter);
-
-                    if !key_type.is_mixed()
-                        && !value_type.is_mixed()
-                        && !contains_generic_param(&key_type)
-                        && !contains_generic_param(&value_type)
-                    {
-                        return Some((key_type, value_type));
-                    }
-                }
-
                 let traversable_metadata = codebase.get_class_like(traversable.as_bytes())?;
                 let key_template = traversable_metadata.template_types.get_index(0).map(|(name, _)| *name)?;
                 let value_template = traversable_metadata.template_types.get_index(1).map(|(name, _)| *name)?;
@@ -1388,6 +1369,36 @@ pub fn get_iterable_parameters(atomic: &TAtomic, codebase: &CodebaseMetadata) ->
                     object.get_type_parameters(),
                 )
                 .unwrap_or_else(get_mixed);
+
+                let contains_generic_param = |t: &TUnion| t.types.iter().any(atomic::TAtomic::is_generic_parameter);
+
+                // An explicit Traversable/Iterator specialization describes
+                // values yielded after `valid()` succeeds. Prefer it over the
+                // nullable sentinel that a direct `current()` call may expose.
+                if !key_type.is_mixed()
+                    && !value_type.is_mixed()
+                    && !contains_generic_param(&key_type)
+                    && !contains_generic_param(&value_type)
+                {
+                    return Some((key_type, value_type));
+                }
+
+                let is_iterator_interface = name == iterator || name == traversable || name == iterator_aggregate;
+                if !is_iterator_interface
+                    && codebase.is_instance_of(class_metadata.name.as_bytes(), iterator.as_bytes())
+                    && let (Some(key_type), Some(value_type)) = (
+                        get_iterator_method_return_type(codebase, name, b"key"),
+                        get_iterator_method_return_type(codebase, name, b"current"),
+                    )
+                {
+                    if !key_type.is_mixed()
+                        && !value_type.is_mixed()
+                        && !contains_generic_param(&key_type)
+                        && !contains_generic_param(&value_type)
+                    {
+                        return Some((key_type, value_type));
+                    }
+                }
 
                 Some((key_type, value_type))
             }

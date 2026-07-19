@@ -132,12 +132,14 @@ pub fn resolve_method_targets<'ctx, 'ast, 'arena, A>(
     object: &'ast Expression<'arena>,
     selector: &'ast ClassLikeMemberSelector<'arena>,
     is_null_safe: bool,
+    allow_possibly_missing_union_target: bool,
     access_span: Span,
 ) -> Result<MethodResolutionResult, AnalysisError>
 where
     A: Arena,
 {
     let mut result = MethodResolutionResult::default();
+    let mut missing_methods = Vec::new();
 
     let was_inside_general_use = block_context.flags.inside_general_use();
     block_context.flags.set_inside_general_use(true);
@@ -242,15 +244,7 @@ where
 
                         if !has_method_assertion {
                             if resolved_magic_call_method.is_empty() {
-                                report_non_existent_method(
-                                    context,
-                                    object.span(),
-                                    selector.span(),
-                                    classname,
-                                    method_name,
-                                );
-
-                                result.has_invalid_target = true;
+                                missing_methods.push((classname, method_name));
                             } else {
                                 report_non_documented_method(
                                     context,
@@ -309,6 +303,16 @@ where
         result.has_invalid_target = true;
         result.encountered_mixed = true;
         report_call_on_non_object(context, &TAtomic::Mixed(TMixed::new()), object.span(), selector.span());
+    }
+
+    let has_callable_target = !result.resolved_methods.is_empty() || !result.magic_call_methods.is_empty();
+    for (classname, method_name) in missing_methods {
+        if has_callable_target && allow_possibly_missing_union_target {
+            report_possibly_non_existent_method(context, object.span(), selector.span(), classname, method_name);
+        } else {
+            report_non_existent_method(context, object.span(), selector.span(), classname, method_name);
+            result.has_invalid_target = true;
+        }
     }
 
     // Compute whether all resolved methods have non-nullable return types.
@@ -462,6 +466,13 @@ where
     let mut method_id = MethodIdentifier::new(class_metadata.original_name, method_name);
     if !context.codebase.method_identifier_exists(&method_id) {
         method_id = context.codebase.get_declaring_method_identifier(&method_id);
+    }
+
+    if context.codebase.get_method_by_id(&method_id).is_none()
+        && let Some(private_method_id) =
+            get_lexically_visible_private_method(context.codebase, block_context, class_metadata, method_name)
+    {
+        method_id = private_method_id;
     }
 
     if let Some(function_like_metadata) = context.codebase.get_method_by_id(&method_id) {
@@ -688,6 +699,33 @@ where
     candidates
 }
 
+/// Private methods are deliberately absent from a child's inheritance maps,
+/// but PHP still resolves a private method declared in the current lexical
+/// class when the receiver is that class or one of its subclasses.
+fn get_lexically_visible_private_method(
+    codebase: &CodebaseMetadata,
+    block_context: &BlockContext<'_>,
+    receiver_metadata: &ClassLikeMetadata,
+    method_name: Word,
+) -> Option<MethodIdentifier> {
+    let lexical_class_name = block_context.scope.get_class_like_name()?;
+    let lexical_metadata = codebase.get_class_like(lexical_class_name.as_bytes())?;
+
+    if receiver_metadata.name != lexical_metadata.name
+        && !codebase.class_extends(receiver_metadata.name.as_bytes(), lexical_metadata.name.as_bytes())
+    {
+        return None;
+    }
+
+    if !lexical_metadata.methods.contains(&method_name) {
+        return None;
+    }
+
+    let method_id = MethodIdentifier::new(lexical_metadata.original_name, method_name);
+    let method_metadata = codebase.get_method_by_id(&method_id)?.method_metadata.as_ref()?;
+    method_metadata.visibility.is_private().then_some(method_id)
+}
+
 fn check_where_method_constraints<A>(
     context: &mut Context<'_, '_, A>,
     object_type: &TObject,
@@ -853,6 +891,31 @@ pub(super) fn report_non_documented_method<A>(
         .with_help(format!(
             "To enable full analysis, add a `@method` tag to the docblock of the `{classname}` class. For example: `/** @method returnType {method_name}(argType $argName) */`"
         )),
+    );
+}
+
+fn report_possibly_non_existent_method<A>(
+    context: &mut Context<'_, '_, A>,
+    obj_span: Span,
+    selector_span: Span,
+    classname: Word,
+    method_name: Word,
+) where
+    A: Arena,
+{
+    let classname = display_class_like_name(context, classname);
+    let method_name = display_method_name(context, classname, method_name);
+    context.collector.report_with_code(
+        IssueCode::PossiblyNonExistentMethod,
+        Issue::warning(format!("Method `{method_name}` may not exist on possible runtime type `{classname}`."))
+            .with_annotation(Annotation::primary(selector_span).with_message("Method is not available on every type"))
+            .with_annotation(
+                Annotation::secondary(obj_span)
+                    .with_message("Another member of this expression's union can handle the call"),
+            )
+            .with_help(format!(
+                "Narrow the receiver before calling `{method_name}`, or declare the method on `{classname}`."
+            )),
     );
 }
 

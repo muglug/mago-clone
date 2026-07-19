@@ -94,6 +94,9 @@ where
         }
     });
 
+    let has_alternative_with_valid_argument_count = invocation_targets.len() > 1
+        && invocation_targets.iter().any(|target| target_accepts_simple_argument_count(target, invocation_arguments));
+
     let mut resulting_type = None;
     for target in invocation_targets {
         if let InvocationTarget::FunctionLike { metadata, .. } = &target {
@@ -137,7 +140,10 @@ where
             }
         }
 
-        let invocation: Invocation<'ctx, 'ast, 'arena> = Invocation::new(target, invocation_arguments, call_span);
+        let argument_count_mismatch_is_possible = has_alternative_with_valid_argument_count
+            && !target_accepts_simple_argument_count(&target, invocation_arguments);
+        let invocation: Invocation<'ctx, 'ast, 'arena> = Invocation::new(target, invocation_arguments, call_span)
+            .with_possible_argument_count_mismatch(argument_count_mismatch_is_possible);
         let mut argument_types = WordMap::default();
 
         analyze_invocation(
@@ -231,6 +237,26 @@ where
     artifacts.set_expression_type(&call_span, resulting_type);
 
     Ok(())
+}
+
+/// Checks the arity envelope for calls whose arguments have an exact positional
+/// count. Named and unpacked arguments keep the normal per-target validation.
+fn target_accepts_simple_argument_count(
+    target: &InvocationTarget<'_>,
+    arguments: InvocationArgumentsSource<'_, '_>,
+) -> bool {
+    if matches!(arguments, InvocationArgumentsSource::PartialArgumentList(_))
+        || arguments.iter_arguments().any(|argument| !argument.is_positional() || argument.is_unpacked())
+    {
+        return false;
+    }
+
+    let required =
+        target.iter_parameters().filter(|parameter| !parameter.has_default() && !parameter.is_variadic()).count();
+    let accepts_extra = target.iter_parameters().any(|parameter| parameter.is_variadic());
+    let provided = arguments.argument_count();
+
+    provided >= required && (accepts_extra || provided <= target.parameter_count())
 }
 
 /// Applies active method call assertions to narrow the return type.

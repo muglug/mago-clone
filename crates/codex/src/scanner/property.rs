@@ -566,7 +566,7 @@ fn update_property_metadata_from_docblock(
                 property_metadata.flags.set(MetadataFlags::DEPRECATED, false);
             }
             TagValue::Readonly(_) => {
-                property_metadata.flags |= MetadataFlags::READONLY;
+                property_metadata.flags |= MetadataFlags::READONLY | MetadataFlags::DOCBLOCK_READONLY;
             }
             _ => {}
         }

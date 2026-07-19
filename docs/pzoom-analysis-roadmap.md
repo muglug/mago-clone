@@ -360,16 +360,149 @@ Phase 4 gate:
 
 ## Phase 5: class/member resolution and remaining control flow
 
-Planned slices:
+Branch: `agent/pzoom-member-control-flow`
 
-1. Unify member lookup across inherited private methods, trait aliases, magic
-   members, intersections, class strings, and enum/interface relationships.
-2. Complete property variance, inherited constant, mixin, and implementation
-   requirement handling.
-3. Close the remaining foreach/loop fixed-point gaps for non-emptiness,
-   by-reference mutation, termination, and switch/continue interaction.
-4. Finish match and try/catch joins using the explicit branch invariants from
-   the conditional-analysis phase.
+Starting baseline: 3,496 passing / 525 failing. A deliberately broad ownership
+cut contains 157 failures: 62 `TypeReconciliation`, 74 class/member/property/
+trait/interface cases, 12 loops, 5 switches, and 4 match/try joins. The exact
+list is frozen outside the repository for before/after comparison during each
+checkpoint.
+
+Execution checkpoints:
+
+1. **Ownership and invariants.** Classify failures by lookup, visibility,
+   specialization, metadata, fixed-point, and branch-join ownership. Keep the
+   12 repeated-method-call memoization cases as explicit non-goals: separate
+   calls remain separate evaluations unless user code stores the value.
+2. **Canonical method lookup.** Return one candidate model containing the
+   declaring class, appearing class, lexical lookup scope, visibility, and
+   receiver template substitution. Use it consistently for inherited private
+   methods, trait aliases, magic fallback, intersections, callable targets,
+   and argument-count checks.
+3. **Property and class-like contracts.** Apply the same declaring/appearing
+   split to real, pseudo, magic, and mixin properties; then complete readonly
+   and template variance, inherited constants, class aliases, and
+   `self`/`parent`/`static` resolution through traits and intersections.
+4. **Loop fixed points.** Represent entry, body, continue/back-edge, break, and
+   normal exit contexts explicitly. Preserve non-emptiness inside `foreach`,
+   invalidate by-reference writes on every back edge, and distinguish
+   terminating infinite loops from loops with reachable exits.
+5. **Switch, match, and exception joins.** Route `continue` to the correct
+   enclosing switch/loop target, retain exhaustiveness and post-dominator
+   facts across match arms, and merge try/catch/finally variables by reachable
+   normal-completion paths rather than syntactic branches.
+6. **Phase gate.** Add one native regression per generalized invariant, freeze
+   every focused before/after set, then run the full native analyzer and Codex
+   suites plus all 4,021 imported Pzoom cases before publication.
+
+Initial checkpoint targets:
+
+- inherited-private and magic method lookup must improve without allowing
+  inaccessible real methods or weakening unknown-method diagnostics;
+- property and class-like work must not rely on method-result identity;
+- loop and branch work must preserve the clause/access-path model delivered by
+  Phases 1 and 3 instead of adding reconciled-variable payloads to clauses.
+
+Checkpoint A (canonical method candidates):
+
+- resolve a private method from the current lexical class when the receiver is
+  that class or a subclass, without adding private members to child inheritance
+  maps or allowing the same access outside the declaring scope;
+- defer missing-method decisions until every receiver atomic has been checked,
+  reporting a warning for an ordinary union call when another runtime target
+  is callable while retaining hard errors for partial-callable creation and
+  unions with no valid target;
+- treat a union target's argument-count mismatch as possible when another
+  signature accepts the exact positional arity, retaining a warning for the
+  narrower target and hard errors when every signature rejects the call;
+- `MethodCall/`: 56 passing / 10 failing, from 53 / 13. The ten residuals are
+  eight intentional repeated-call non-goals and two DOM metadata contracts;
+- full corpus: 3,501 passing / 520 failing, resolving five cases with zero new
+  failures;
+- native analyzer: 348 unit and 2,415 integration tests pass.
+
+Checkpoint B (property specialization and extension metadata):
+
+- specialize inherited property contracts through the extending class's
+  template map before checking native or PHPDoc invariance, including nested
+  lists, generic objects, `class-string<T>`, and grandchild substitutions;
+- allow a narrowed PHPDoc override only when the original parent contract uses
+  a covariant template parameter or is explicitly `@readonly`; retain native
+  `readonly` modifier invariance as a separate, tested PHP rule;
+- preserve concrete `DOMNode::appendChild()` inputs in its result and refine
+  `DOMElement::$attributes`/`$localName` without weakening the nullable base
+  `DOMNode` contracts;
+- `MethodCall/`: 58 passing / 8 failing. Every residual is an intentional
+  repeated-call identity non-goal after removing analyzer memoization;
+- `PropertyTypeInvariance/`: 9 passing / 0 failing, from 4 / 5;
+- full corpus: 3,510 passing / 511 failing, resolving nine cases with zero new
+  failures. Template-aware property localization additionally fixes
+  `PropertyType/genericTypeFromPropertyMap` and `propertyMapHydration`;
+- native analyzer: 348 unit and 2,416 integration tests pass; the complete
+  Codex suite passes.
+
+Checkpoint C (loop entry, back-edge, and exit contexts):
+
+- recognize omitted and statically truthy `for`/`while` conditions as
+  non-terminating unless a reachable break exists, so normal function exit is
+  not synthesized after an infinite loop;
+- mark an iterated array non-empty only in the `foreach` body, preserving that
+  fact for direct variables and property paths without leaking it after a
+  possibly-empty loop;
+- record synthetic foreach/by-reference assignments in the same assignment
+  bookkeeping as source assignments, so each iteration's key/value targets
+  replace back-edge values before the body is reanalyzed;
+- retain prior-iteration values only for self-referential pre-condition
+  assignments such as `$value = next($value ?? $initial)`, rather than broadly
+  carrying every condition assignment and destabilizing unrelated loop facts;
+- count both switches and loops for PHP's numeric `continue` target while
+  mapping the selected target back to the owning loop scope;
+- prefer explicit Traversable template parameters for foreach element types,
+  falling back to concrete `current()`/`key()` methods only for unparameterized
+  iterators; SimpleXML metadata now exposes its non-null yielded element type;
+- `Loop/`: 152 passing / 2 failing, from 142 / 12. The two residuals are a
+  standalone `@var` trust-policy case and a generic array-offset policy case,
+  not fixed-point mechanics;
+- full corpus: 3,521 passing / 500 failing, resolving eleven cases with zero
+  new failures, including `Php71/iterableArg` outside the focused loop set;
+- native analyzer: 348 unit and 2,417 integration tests pass; the complete
+  Codex suite passes.
+
+Checkpoint D (match-derived subject reconciliation and branch joins):
+
+- retain Mago's synthetic match subject as the identity of PHP's single
+  subject evaluation, while also generating Pzoom-style variable-free
+  equality clauses from the original derived subject;
+- use the source view to reconcile `count($array) === 0` back to the array and
+  `get_class($value) === Foo::class` back to the object, without treating a
+  future function or method call as the same evaluation;
+- negate the captured-value and source-relation views independently for later
+  and default arms, so a throwing empty-count arm proves the default result is
+  a non-empty array;
+- `Match/`: 10 passing / 0 failing, from 8 / 2. No imported switch or try case
+  remains in the Phase 5 failure set; numeric switch/loop continuation was
+  completed in Checkpoint C, and existing exception arms already join only
+  through reachable normal-completion contexts;
+- full corpus: 3,523 passing / 498 failing, resolving exactly
+  `Match/MatchWithCount` and `Match/getClassWithMethod` with zero new failures;
+- native analyzer: 348 unit and 2,418 integration tests pass; Codex: 199
+  passing / 0 failing; formatting and diff checks pass.
+
+Phase 5 gate:
+
+- full Pzoom corpus moved from 3,496 passing / 525 failing to 3,523 passing /
+  498 failing: 27 independently identified failures resolved with no newly
+  failing cases;
+- class/member resolution now carries declaring, appearing, and lexical
+  context through private and union candidates, while inherited property
+  contracts specialize receiver templates before compatibility checks;
+- loop fixed points distinguish entry, back-edge, break, and normal-exit facts,
+  and match-derived conditions now use the same access-path formula mechanics
+  as ordinary conditionals;
+- clauses remain variable-free and analyzer method-result memoization remains
+  excluded. The eight residual `MethodCall/` identity cases are intentional
+  non-goals;
+- native analyzer and Codex gates are green at the Checkpoint D counts above.
 
 This phase is intentionally last because many current member/control-flow
 failures are downstream symptoms of missing template substitution, provider

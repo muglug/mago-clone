@@ -321,6 +321,11 @@ pub(crate) fn assign_to_expression<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
+    if let Some(target_expression_id) = target_expression_id {
+        block_context.assigned_variable_ids.insert(target_expression_id, target_expression.start_offset());
+        block_context.possibly_assigned_variable_ids.insert(target_expression_id);
+    }
+
     if let Some(source_expression) = source_expression {
         if source_expression.is_reference() != source_type.by_reference() {
             Rc::make_mut(&mut source_type).set_by_reference(source_expression.is_reference());

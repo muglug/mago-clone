@@ -16,6 +16,33 @@ use mago_syntax::walker::MutWalker;
 use mago_word::Word;
 
 use crate::utils::expression::get_root_expression_id;
+use crate::utils::expression::variable::get_variables_referenced_in_expression;
+use crate::utils::misc::unwrap_expression;
+
+/// Finds variables whose loop pre-condition assignment reads the variable's
+/// previous-iteration value on its right-hand side.
+pub fn get_self_referential_pre_condition_variables(pre_conditions: &[&Expression<'_>]) -> mago_word::WordSet {
+    let mut variables = mago_word::WordSet::default();
+
+    for pre_condition in pre_conditions {
+        let Expression::Assignment(assignment) = unwrap_expression(pre_condition) else {
+            continue;
+        };
+
+        let Some(assigned_variable) = get_root_expression_id(assignment.lhs) else {
+            continue;
+        };
+
+        if get_variables_referenced_in_expression(assignment.rhs, true)
+            .iter()
+            .any(|(name, _)| Word::from(*name) == assigned_variable)
+        {
+            variables.insert(assigned_variable);
+        }
+    }
+
+    variables
+}
 
 pub fn get_assignment_map<'ast, 'arena>(
     pre_conditions: &[&'ast Expression<'arena>],

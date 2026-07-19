@@ -7,6 +7,9 @@ pub struct MetadataFlags(u64);
 impl MetadataFlags {
     pub const ABSTRACT: MetadataFlags = MetadataFlags(1 << 0);
     pub const FINAL: MetadataFlags = MetadataFlags(1 << 1);
+    /// The property's readonly semantics came from a PHPDoc `@readonly` tag,
+    /// rather than PHP's native `readonly` modifier.
+    pub const DOCBLOCK_READONLY: MetadataFlags = MetadataFlags(1 << 2);
     pub const READONLY: MetadataFlags = MetadataFlags(1 << 3);
     pub const DEPRECATED: MetadataFlags = MetadataFlags(1 << 4);
     pub const ENUM_INTERFACE: MetadataFlags = MetadataFlags(1 << 5);
@@ -174,6 +177,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_readonly(self) -> bool {
         self.contains(Self::READONLY)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_docblock_readonly(self) -> bool {
+        self.contains(Self::DOCBLOCK_READONLY)
     }
 
     #[inline]

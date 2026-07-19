@@ -348,6 +348,7 @@ where
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
             span: instantiation_span,
+            argument_count_mismatch_is_possible: false,
         };
 
         let mut argument_types = WordMap::default();
@@ -590,6 +591,7 @@ where
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
             span: instantiation_span,
+            argument_count_mismatch_is_possible: false,
         };
 
         let mut template_result =

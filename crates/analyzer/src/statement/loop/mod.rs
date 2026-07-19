@@ -63,6 +63,7 @@ use crate::error::AnalysisError;
 use crate::formula::get_formula;
 use crate::reconciler::reconcile_keyed_types;
 use crate::statement::r#loop::assignment_map_visitor::get_assignment_map;
+use crate::statement::r#loop::assignment_map_visitor::get_self_referential_pre_condition_variables;
 use crate::statement::r#loop::cleaner::clean_nodes;
 
 mod assignment_map_visitor;
@@ -123,6 +124,11 @@ where
     loop_block_context.loop_bounds = previous_loop_bounds;
 
     let always_enters_loop = infinite_loop || loop_scope.truthy_pre_conditions;
+    let known_infinite_loop = infinite_loop
+        || conditions
+            .last()
+            .and_then(|condition| artifacts.get_expression_type(*condition))
+            .is_some_and(TUnion::is_always_truthy);
 
     if loop_scope.condition_always_false {
         for condition in conditions {
@@ -150,10 +156,10 @@ where
         inner_loop_block_context,
         loop_scope,
         always_enters_loop,
-        infinite_loop,
+        known_infinite_loop,
     );
 
-    if always_enters_loop && !infinite_loop {
+    if always_enters_loop && !known_infinite_loop {
         for variable_type in block_context.locals.values_mut() {
             let mut union = (**variable_type).clone();
             if mark_array_keys_definite(&mut union) {
@@ -246,6 +252,7 @@ where
     let always_enters_loop = Cell::new(always_enters_loop);
 
     let (mut assignment_map, first_variable_id) = get_assignment_map(pre_conditions, &post_expressions, statements);
+    let self_referential_pre_condition_variables = get_self_referential_pre_condition_variables(pre_conditions);
     let assignment_depth_limit = context.settings.loop_assignment_depth_threshold as usize;
     let assignment_depth = if let Some(first_variable_id) = first_variable_id {
         get_assignment_map_depth(first_variable_id, &mut assignment_map, assignment_depth_limit)
@@ -620,7 +627,7 @@ where
                         has_changes = true;
                     }
 
-                    if !is_do {
+                    if !is_do && !self_referential_pre_condition_variables.contains(&variable_id) {
                         variables_to_remove.push(variable_id);
                     }
                 }
@@ -1050,7 +1057,9 @@ fn is_iteration_dependent_truthiness_issue(code: Option<&str>) -> bool {
         Ok(IssueCode::ImpossibleCondition
             | IssueCode::RedundantComparison
             | IssueCode::RedundantCondition
-            | IssueCode::RedundantTypeComparison)
+            | IssueCode::RedundantLogicalOperation
+            | IssueCode::RedundantTypeComparison
+            | IssueCode::UnreachableElseClause)
     )
 }
 

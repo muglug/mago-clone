@@ -491,7 +491,6 @@ fn push_not_null_clause<A>(
 ///
 /// Returns `None` if the formula's complexity exceeds the provided `formula_size_threshold`,
 /// to avoid performance degradation.
-#[allow(dead_code)]
 pub fn get_disjunctive_equality_formula<A>(
     subject: &Expression,
     conditions: Vec<&Expression>,

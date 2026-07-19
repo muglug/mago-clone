@@ -313,7 +313,7 @@ where
     }
 
     let method_resolution =
-        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, span)?;
+        resolve_method_targets(context, block_context, artifacts, object, selector, is_null_safe, true, span)?;
 
     if method_resolution.resolved_methods.is_empty() && !method_resolution.magic_call_methods.is_empty() {
         return analyze_magic_call_return_type(
@@ -833,6 +833,149 @@ mod tests {
         "},
         issues = [
             IssueCode::WriteOnlyProperty,
+        ]
+    }
+
+    test_analysis! {
+        name = possible_missing_method_on_union_with_magic_target,
+        code = indoc! {"
+            <?php
+
+            final class MagicUnionTarget
+            {
+                public function __call(string $method, array $arguments): void
+                {
+                }
+            }
+
+            final class PlainUnionTarget
+            {
+            }
+
+            function invoke_possible_magic_target(MagicUnionTarget|PlainUnionTarget $target): void
+            {
+                $target->dynamicMethod();
+            }
+        "},
+        issues = [
+            IssueCode::NonDocumentedMethod,
+            IssueCode::PossiblyNonExistentMethod,
+        ]
+    }
+
+    test_analysis! {
+        name = possible_argument_count_mismatch_for_union_method,
+        code = indoc! {"
+            <?php
+
+            final class OneArgumentTarget
+            {
+                public function invoke(int $value): void
+                {
+                }
+            }
+
+            final class TwoArgumentTarget
+            {
+                public function invoke(int $value, string $label): void
+                {
+                }
+            }
+
+            function invoke_union_target(OneArgumentTarget|TwoArgumentTarget $target): void
+            {
+                $target->invoke(1, 'label');
+            }
+        "},
+        issues = [
+            // A warning is retained for the narrower possible runtime target.
+            IssueCode::TooManyArguments,
+        ]
+    }
+
+    test_analysis! {
+        name = argument_count_mismatch_for_every_union_method,
+        code = indoc! {"
+            <?php
+
+            final class InvalidUnionTargetA
+            {
+                public function invoke(int $value): void
+                {
+                }
+            }
+
+            final class InvalidUnionTargetB
+            {
+                public function invoke(int $value): void
+                {
+                }
+            }
+
+            function invoke_invalid_union_target(InvalidUnionTargetA|InvalidUnionTargetB $target): void
+            {
+                $target->invoke(1, 'label');
+            }
+        "},
+        issues = [
+            IssueCode::TooManyArguments,
+            IssueCode::TooManyArguments,
+        ]
+    }
+
+    test_analysis! {
+        name = parent_private_method_on_subclass_receiver_in_lexical_scope,
+        code = indoc! {"
+            <?php
+
+            abstract class LexicalPrivateParent
+            {
+                final public function read(LexicalPrivateChild $child): int
+                {
+                    return $child->value();
+                }
+
+                private function value(): int
+                {
+                    return 1;
+                }
+            }
+
+            final class LexicalPrivateChild extends LexicalPrivateParent
+            {
+            }
+        "},
+    }
+
+    test_analysis! {
+        name = parent_private_method_on_subclass_receiver_outside_lexical_scope,
+        code = indoc! {"
+            <?php
+
+            abstract class HiddenPrivateParent
+            {
+                final public function readOwn(): int
+                {
+                    return $this->value();
+                }
+
+                private function value(): int
+                {
+                    return 1;
+                }
+            }
+
+            final class HiddenPrivateChild extends HiddenPrivateParent
+            {
+            }
+
+            function read_hidden_private(HiddenPrivateChild $child): void
+            {
+                $child->value();
+            }
+        "},
+        issues = [
+            IssueCode::NonExistentMethod,
         ]
     }
 

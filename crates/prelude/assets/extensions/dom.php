@@ -386,7 +386,12 @@ namespace {
 
         public string $textContent;
 
-        /** @return DOMNode|false */
+        /**
+         * @template TNode of DOMNode
+         * @param TNode $node
+         * @return TNode|false
+         * @ignore-falsable-return
+         */
         public function appendChild(DOMNode $node) {}
 
         public function C14N(
@@ -693,6 +698,18 @@ namespace {
 
     class DOMElement extends DOMNode implements \DOMParentNode, \DOMChildNode
     {
+        /**
+         * @readonly
+         * @var DOMNamedNodeMap<DOMAttr>
+         */
+        public DOMNamedNodeMap $attributes;
+
+        /**
+         * @readonly
+         * @var string
+         */
+        public string $localName;
+
         /**
          * @readonly
          */
