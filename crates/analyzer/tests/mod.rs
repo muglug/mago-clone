@@ -98,6 +98,8 @@ test_case!(arrays_array_map_multi);
 test_case!(arrays_array_merge_two_lists);
 test_case!(array_provider_precision);
 test_case!(assertion_contract_paths);
+test_case!(repeated_guarded_expression_advice);
+test_case!(pzoom_assertion_alignment);
 test_case!(arrays_max_on_possibly_empty);
 test_case!(arrays_min_on_possibly_empty);
 test_case!(arrays_array_pop);

@@ -47,6 +47,10 @@ impl MetadataFlags {
     pub const EXPERIMENTAL: MetadataFlags = MetadataFlags(1 << 40);
     pub const POLYFILL: MetadataFlags = MetadataFlags(1 << 41);
     pub const PATCH: MetadataFlags = MetadataFlags(1 << 42);
+    /// The method body is exactly a parameterless `return $this->property;`
+    /// getter. This structural fact is used for diagnostics and does not imply
+    /// that call results are memoized by the analyzer.
+    pub const SIMPLE_PROPERTY_GETTER: MetadataFlags = MetadataFlags(1 << 43);
 }
 
 impl MetadataFlags {
@@ -321,6 +325,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_external_mutation_free(self) -> bool {
         self.contains(Self::EXTERNAL_MUTATION_FREE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_simple_property_getter(self) -> bool {
+        self.contains(Self::SIMPLE_PROPERTY_GETTER)
     }
 
     #[inline]

@@ -16,16 +16,14 @@ function ctype_alpha(string $text): bool {}
 function ctype_cntrl(string $text): bool {}
 
 /**
- * @assert-if-true numeric-string $text
- *
  * @pure
  */
-function ctype_digit(string $text): bool {}
+function ctype_digit(string|int $text): bool {}
 
 /**
  * @pure
  */
-function ctype_lower(string $text): bool {}
+function ctype_lower(string|int $text): bool {}
 
 /**
  * @pure
@@ -50,7 +48,7 @@ function ctype_space(string $text): bool {}
 /**
  * @pure
  */
-function ctype_upper(string $text): bool {}
+function ctype_upper(string|int $text): bool {}
 
 /**
  * @pure

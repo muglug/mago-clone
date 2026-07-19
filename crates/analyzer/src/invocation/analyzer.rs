@@ -512,6 +512,8 @@ where
 
             verify_argument_type(
                 context,
+                block_context,
+                artifacts,
                 &argument_value_type,
                 &final_parameter_type,
                 *argument_offset,
@@ -821,6 +823,8 @@ where
 
                         verify_argument_type(
                             context,
+                            block_context,
+                            artifacts,
                             &unpacked_element_type,
                             &final_variadic_parameter_type,
                             last_parameter_offset,
@@ -876,6 +880,8 @@ where
 
                         validate_unpacked_argument_elements(
                             context,
+                            block_context,
+                            artifacts,
                             &argument_value_type,
                             argument_expression,
                             base_class_metadata,
@@ -1086,6 +1092,8 @@ where
 /// Validates individual elements within unpacked arrays against their corresponding parameters.
 fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     argument_value_type: &TUnion,
     argument_expression: &Expression<'arena>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1152,6 +1160,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
                             verify_argument_type(
                                 context,
+                                block_context,
+                                artifacts,
                                 element_type,
                                 &final_parameter_type,
                                 parameter_position,
@@ -1205,6 +1215,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
                             verify_argument_type(
                                 context,
+                                block_context,
+                                artifacts,
                                 element_type,
                                 &final_parameter_type,
                                 parameter_position,
@@ -1218,6 +1230,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
             TArray::Keyed(keyed_array) => {
                 validate_keyed_array_elements(
                     context,
+                    block_context,
+                    artifacts,
                     keyed_array,
                     argument_expression,
                     base_class_metadata,
@@ -1236,6 +1250,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
 fn validate_keyed_array_elements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     keyed_array: &mago_codex::ttype::atomic::array::keyed::TKeyedArray,
     argument_expression: &Expression<'arena>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1313,6 +1329,8 @@ fn validate_keyed_array_elements<'ctx, 'arena, A>(
 
             verify_argument_type(
                 context,
+                block_context,
+                artifacts,
                 element_type,
                 &final_parameter_type,
                 parameter_position,

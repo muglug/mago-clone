@@ -14,8 +14,10 @@ use mago_codex::ttype::atomic::scalar::int::TInteger;
 use mago_codex::ttype::atomic::scalar::string::TString;
 use mago_codex::ttype::atomic::scalar::string::TStringCasing;
 use mago_codex::ttype::cast::cast_atomic_to_callable;
+use mago_codex::ttype::comparator::union_comparator::can_expression_types_be_identical;
 use mago_codex::ttype::get_array_value_parameter;
 use mago_codex::ttype::get_iterable_value_parameter;
+use mago_codex::ttype::intersect_union_types;
 use mago_span::HasSpan;
 use mago_span::Span;
 use mago_syntax::cst::Access;
@@ -140,7 +142,6 @@ where
                     && let Some(first_argument_type) = artifacts.get_expression_type(first_argument.value())
                 {
                     let mut callables = vec![];
-
                     let mut add_callable_assertion = |atomic: &TAtomic| {
                         if let Some(callable) = cast_atomic_to_callable(atomic, assertion_context.codebase, None) {
                             callables.push(Assertion::IsType(TAtomic::Callable(callable.into_owned())));
@@ -313,25 +314,32 @@ where
         let key_argument = function_call.argument_list.arguments.first().map(mago_syntax::cst::Argument::value);
         let array_argument = function_call.argument_list.arguments.get(1).map(mago_syntax::cst::Argument::value);
 
-        if let (Some(key_argument), Some(array_argument)) = (key_argument, array_argument)
-            && get_expression_array_key(artifacts, key_argument).is_none()
-            && let Some(array_id) = get_expression_id(
-                array_argument,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            )
-            && let Some(index_id) = get_index_id(
-                key_argument,
-                assertion_context.this_class_name,
-                assertion_context.resolved_names,
-                Some(assertion_context.codebase),
-            )
-        {
-            let access_id = concat_word!(array_id.as_bytes(), b"[", index_id.as_bytes(), b"]");
-            if_types.insert(access_id, vec![vec![Assertion::ArrayKeyExists]]);
+        if let (Some(key_argument), Some(array_argument)) = (key_argument, array_argument) {
+            if let Some(key_id) = get_assertable_expression_id(key_argument, assertion_context)
+                && let Some(array_type) = artifacts.get_expression_type(array_argument)
+                && let Some(key_union) = extract_array_key_union(array_type, assertion_context.codebase)
+                && !key_union.is_never()
+            {
+                if_types.insert(key_id, vec![vec![Assertion::InArray(key_union)]]);
+            }
 
-            return if_types;
+            if get_expression_array_key(artifacts, key_argument).is_none()
+                && let Some(array_id) = get_expression_id(
+                    array_argument,
+                    assertion_context.this_class_name,
+                    assertion_context.resolved_names,
+                    Some(assertion_context.codebase),
+                )
+                && let Some(index_id) = get_index_id(
+                    key_argument,
+                    assertion_context.this_class_name,
+                    assertion_context.resolved_names,
+                    Some(assertion_context.codebase),
+                )
+            {
+                let access_id = concat_word!(array_id.as_bytes(), b"[", index_id.as_bytes(), b"]");
+                if_types.insert(access_id, vec![vec![Assertion::ArrayKeyExists]]);
+            }
         }
     }
 
@@ -399,33 +407,30 @@ where
             b"is_countable" => Some((0, vec![Assertion::Countable])),
             b"ctype_digit" => Some((
                 0,
-                vec![Assertion::IsType(TAtomic::Scalar(TScalar::String(TString::general_with_props(
-                    true,
-                    false,
-                    false,
-                    false,
-                    TStringCasing::Unspecified,
-                ))))],
+                get_ctype_assertions(
+                    function_call,
+                    artifacts,
+                    TInteger::Range(48, 57),
+                    TString::general_with_props(true, false, false, false, TStringCasing::Unspecified),
+                ),
             )),
             b"ctype_lower" => Some((
                 0,
-                vec![Assertion::IsType(TAtomic::Scalar(TScalar::String(TString::general_with_props(
-                    false,
-                    false,
-                    true,
-                    false,
-                    TStringCasing::Lowercase,
-                ))))],
+                get_ctype_assertions(
+                    function_call,
+                    artifacts,
+                    TInteger::Range(97, 122),
+                    TString::general_with_props(false, false, true, false, TStringCasing::Lowercase),
+                ),
             )),
             b"ctype_upper" => Some((
                 0,
-                vec![Assertion::IsType(TAtomic::Scalar(TScalar::String(TString::general_with_props(
-                    false,
-                    false,
-                    true,
-                    false,
-                    TStringCasing::Uppercase,
-                ))))],
+                get_ctype_assertions(
+                    function_call,
+                    artifacts,
+                    TInteger::Range(65, 90),
+                    TString::general_with_props(false, false, true, false, TStringCasing::Uppercase),
+                ),
             )),
             b"count" => Some((0, vec![Assertion::HasAtLeastCount(1)])),
             b"function_exists" => {
@@ -602,6 +607,90 @@ where
     if_types
 }
 
+fn get_ctype_assertions(
+    function_call: &FunctionCall<'_>,
+    artifacts: &AnalysisArtifacts,
+    integer_range: TInteger,
+    string_type: TString,
+) -> Vec<Assertion> {
+    let argument_type = function_call
+        .argument_list
+        .arguments
+        .first()
+        .and_then(|argument| artifacts.get_expression_type(argument.value()));
+    let could_be_int = argument_type.is_none_or(|argument| argument.has_int() || argument.has_mixed());
+    let could_be_string = argument_type.is_none_or(|argument| argument.has_string() || argument.has_mixed());
+    let mut assertions = Vec::with_capacity(2);
+
+    if could_be_int {
+        assertions.push(Assertion::IsEqual(TAtomic::Scalar(TScalar::Integer(integer_range))));
+    }
+    if could_be_string {
+        assertions.push(Assertion::IsEqual(TAtomic::Scalar(TScalar::String(string_type))));
+    }
+
+    if assertions.is_empty() {
+        assertions.push(Assertion::IsEqual(TAtomic::Scalar(TScalar::Integer(integer_range))));
+        assertions.push(Assertion::IsEqual(TAtomic::Scalar(TScalar::String(string_type))));
+    }
+
+    assertions
+}
+
+/// Extracts the key union that a successful `array_key_exists()` call proves
+/// for its key argument. This mirrors Pzoom's key-side assertion rather than
+/// only marking the selected array offset as present.
+fn extract_array_key_union(
+    array_type: &mago_codex::ttype::union::TUnion,
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+) -> Option<mago_codex::ttype::union::TUnion> {
+    let mut key_union = None;
+
+    for atomic in array_type.types.as_ref() {
+        let mago_codex::ttype::atomic::TAtomic::Array(array) = atomic else {
+            continue;
+        };
+
+        let (keys, _) = mago_codex::ttype::get_array_parameters(array, codebase);
+        let keys = loosen_array_key_union(keys);
+        key_union = Some(add_optional_union_type(keys, key_union.as_ref(), codebase));
+    }
+
+    key_union
+}
+
+fn loosen_array_key_union(keys: mago_codex::ttype::union::TUnion) -> mago_codex::ttype::union::TUnion {
+    let mut loose_keys = Vec::new();
+
+    for atomic in keys.types.into_owned() {
+        let alternate = if let Some(value) = atomic.get_literal_int_value() {
+            Some(TAtomic::Scalar(TScalar::literal_string(word(value.to_string()))))
+        } else if let Some(value) = atomic.get_literal_string_value() {
+            std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok().filter(|parsed| value == parsed.to_string()))
+                .map(|value| TAtomic::Scalar(TScalar::literal_int(value)))
+        } else if atomic.is_int() {
+            Some(TAtomic::Scalar(TScalar::string()))
+        } else if atomic.is_any_string() {
+            Some(TAtomic::Scalar(TScalar::int()))
+        } else {
+            None
+        };
+
+        if !loose_keys.contains(&atomic) {
+            loose_keys.push(atomic);
+        }
+        if let Some(alternate) = alternate
+            && !loose_keys.contains(&alternate)
+        {
+            loose_keys.push(alternate);
+        }
+    }
+
+    mago_codex::ttype::union::TUnion::from_vec(loose_keys)
+}
+
 pub(super) fn scrape_equality_assertions<A>(
     left: &Expression,
     is_identity: bool,
@@ -612,6 +701,12 @@ pub(super) fn scrape_equality_assertions<A>(
 where
     A: Arena,
 {
+    if is_identity
+        && let Some(assertions) = scrape_variable_union_identity_assertions(left, right, artifacts, assertion_context)
+    {
+        return assertions;
+    }
+
     if let Some(assertions) = scrape_class_constant_equality_assertions(
         left,
         right,
@@ -686,6 +781,71 @@ where
     }
 
     vec![]
+}
+
+fn scrape_variable_union_identity_assertions<A>(
+    left: &Expression,
+    right: &Expression,
+    artifacts: &AnalysisArtifacts,
+    assertion_context: AssertionContext<'_, '_, A>,
+) -> Option<Vec<WordMap<AssertionSet>>>
+where
+    A: Arena,
+{
+    let left_id = get_assertable_expression_id(left, assertion_context)?;
+    let right_id = get_assertable_expression_id(right, assertion_context)?;
+    if left_id == right_id {
+        return None;
+    }
+
+    let left_type = artifacts.get_expression_type(left)?;
+    let right_type = artifacts.get_expression_type(right)?;
+    if left_type.is_mixed() || right_type.is_mixed() || left_type.is_single() || right_type.is_single() {
+        return None;
+    }
+
+    let intersection = intersect_strict_identity_unions(left_type, right_type, assertion_context.codebase)?;
+    if intersection.is_never() {
+        return None;
+    }
+
+    let assertions = intersection.types.into_owned().into_iter().map(Assertion::IsIdentical).collect::<Vec<_>>();
+    if assertions.is_empty() {
+        return None;
+    }
+
+    let mut left_result = WordMap::default();
+    left_result.insert(left_id, vec![assertions.clone()]);
+    let mut right_result = WordMap::default();
+    right_result.insert(right_id, vec![assertions]);
+
+    Some(vec![left_result, right_result])
+}
+
+/// Intersect unions for `===` without treating PHP's parameter-level scalar
+/// coercions (notably `int` to `float`) as value identity.
+fn intersect_strict_identity_unions(
+    left: &mago_codex::ttype::union::TUnion,
+    right: &mago_codex::ttype::union::TUnion,
+    codebase: &mago_codex::metadata::CodebaseMetadata,
+) -> Option<mago_codex::ttype::union::TUnion> {
+    let mut compatible = Vec::new();
+
+    for left_atomic in left.types.as_ref() {
+        let left_union = mago_codex::ttype::union::TUnion::from_atomic(left_atomic.clone());
+        for right_atomic in right.types.as_ref() {
+            let right_union = mago_codex::ttype::union::TUnion::from_atomic(right_atomic.clone());
+            if !can_expression_types_be_identical(codebase, &left_union, &right_union, true, false) {
+                continue;
+            }
+
+            if let Some(intersection) = intersect_union_types(&left_union, &right_union, codebase) {
+                compatible.extend(intersection.types.into_owned());
+            }
+        }
+    }
+
+    if compatible.is_empty() { None } else { Some(mago_codex::ttype::union::TUnion::from_vec(compatible)) }
 }
 
 fn scrape_inequality_assertions<A>(

@@ -38,6 +38,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::resolver::class_name::report_non_existent_class_like;
 use crate::resolver::selector::resolve_member_selector;
+use crate::utils::guarded_expression::add_guarded_expression_advice;
 use crate::utils::names::display_class_like_name;
 use crate::utils::names::display_method_name;
 use crate::visibility::check_method_visibility;
@@ -183,17 +184,20 @@ where
                 if !object_type.ignore_nullable_issues() && !is_null_safe && !object_type.has_nullsafe_null() {
                     result.has_invalid_target = true;
 
+                    let issue = Issue::error("Attempting to call a method on `null`.")
+                        .with_annotation(
+                            Annotation::primary(object.span()).with_message("This expression can be `null`"),
+                        )
+                        .with_help("Use the nullsafe operator (`?->`) if `null` is an expected value.");
+                    let issue = add_guarded_expression_advice(issue, object, context, block_context, artifacts);
+
                     context.collector.report_with_code(
                         if object_type.is_null() {
                             IssueCode::MethodAccessOnNull
                         } else {
                             IssueCode::PossibleMethodAccessOnNull
                         },
-                        Issue::error("Attempting to call a method on `null`.")
-                            .with_annotation(
-                                Annotation::primary(object.span()).with_message("This expression can be `null`"),
-                            )
-                            .with_help("Use the nullsafe operator (`?->`) if `null` is an expected value."),
+                        issue,
                     );
                 }
 

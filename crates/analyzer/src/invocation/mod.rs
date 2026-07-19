@@ -223,6 +223,37 @@ impl<'ctx> InvocationTarget<'ctx> {
         }
     }
 
+    /// Whether a zero-argument method result is stable enough that analyzers
+    /// such as Pzoom/Psalm would reuse a previous narrowing. Mago deliberately
+    /// does not reuse the value; this classification exists solely to provide
+    /// a targeted diagnostic when a repeated evaluation loses that narrowing.
+    pub fn has_stable_method_result_contract(&self) -> bool {
+        let InvocationTarget::FunctionLike { metadata, method_context: Some(method_context), .. } = self else {
+            return false;
+        };
+
+        let Some(method_metadata) = metadata.method_metadata.as_ref() else {
+            return false;
+        };
+
+        if method_metadata.is_static {
+            return false;
+        }
+
+        let declared_stable = metadata.flags.is_pure()
+            || metadata.flags.is_mutation_free()
+            || method_context.class_like_metadata.flags.is_mutation_free();
+        if declared_stable {
+            return true;
+        }
+
+        metadata.flags.is_simple_property_getter()
+            && (method_metadata.is_final
+                || method_metadata.visibility.is_private()
+                || method_context.class_like_metadata.flags.is_final()
+                || method_context.class_like_metadata.flags.is_mutation_free())
+    }
+
     /// Checks if the target is a dynamic callable that is not explicitly a closure type.
     /// This can be true for `callable` type hints or invocable objects that aren't closures.
     #[inline]

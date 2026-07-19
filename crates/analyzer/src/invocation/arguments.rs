@@ -32,6 +32,7 @@ use crate::context::block::BlockContext;
 use crate::error::AnalysisError;
 use crate::invocation::InvocationTarget;
 use crate::utils::get_type_diff;
+use crate::utils::guarded_expression::add_guarded_expression_advice;
 
 /// Checks if an argument can be passed by reference.
 fn is_argument_referenceable(argument_expression: &Expression, argument_type: &TUnion) -> bool {
@@ -176,8 +177,10 @@ pub fn infer_callable_parameter_types(
 }
 
 /// Verifies an argument's type against the expected parameter type.
-pub fn verify_argument_type<'arena, A>(
-    context: &mut Context<'_, 'arena, A>,
+pub fn verify_argument_type<'ctx, 'arena, A>(
+    context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     input_type: &TUnion,
     parameter_type: &TUnion,
     argument_offset: usize,
@@ -263,22 +266,22 @@ pub fn verify_argument_type<'arena, A>(
             let parameter_type_str = parameter_type.get_id();
             let call_site = Annotation::secondary(invocation_target.span())
                 .with_message(format!("Arguments to this {target_kind_str} are incorrect"));
-            context.collector.report_with_code(
-                IssueCode::PossiblyNullArgument,
-                Issue::error(format!(
-                    "Argument #{} of {} `{}` is possibly `null`, but parameter type `{}` does not accept it.",
-                    argument_offset + 1,
-                    target_kind_str,
-                    target_name_str,
-                    parameter_type_str
-                ))
-                .with_annotation(
-                    Annotation::primary(input_expression.span())
-                        .with_message(format!("This argument of type `{input_type_str}` might be `null`")),
-                )
-                .with_annotation(call_site)
-                .with_help("Add a `null` check before this call to ensure the value is not `null`."),
-            );
+            let issue = Issue::error(format!(
+                "Argument #{} of {} `{}` is possibly `null`, but parameter type `{}` does not accept it.",
+                argument_offset + 1,
+                target_kind_str,
+                target_name_str,
+                parameter_type_str
+            ))
+            .with_annotation(
+                Annotation::primary(input_expression.span())
+                    .with_message(format!("This argument of type `{input_type_str}` might be `null`")),
+            )
+            .with_annotation(call_site)
+            .with_help("Add a `null` check before this call to ensure the value is not `null`.");
+            let issue = add_guarded_expression_advice(issue, input_expression, context, block_context, artifacts);
+
+            context.collector.report_with_code(IssueCode::PossiblyNullArgument, issue);
         }
     }
 
@@ -488,6 +491,10 @@ pub fn verify_argument_type<'arena, A>(
 
         if let Some(type_diff) = get_type_diff(context, parameter_type, input_type) {
             issue = issue.with_note(type_diff);
+        }
+
+        if kind == IssueCode::PossiblyInvalidArgument {
+            issue = add_guarded_expression_advice(issue, input_expression, context, block_context, artifacts);
         }
 
         context.collector.report_with_code(kind, issue);

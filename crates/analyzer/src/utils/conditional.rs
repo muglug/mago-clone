@@ -26,6 +26,7 @@ use crate::context::scope::conditional_scope::IfConditionalScope;
 use crate::context::scope::if_scope::IfScope;
 use crate::error::AnalysisError;
 use crate::reconciler::reconcile_keyed_types;
+use crate::utils::guarded_expression::record_true_branch_guards;
 
 pub(crate) fn analyze<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
@@ -165,6 +166,13 @@ where
     };
 
     if_body_context.if_body_context = tmp_if_body_context_nested;
+
+    record_true_branch_guards(
+        condition,
+        artifacts,
+        context.get_assertion_context_from_block(&if_body_context),
+        &mut if_body_context,
+    );
 
     let condition_span = condition.span();
     let condition_range = (condition_span.start_offset(), condition_span.end_offset());

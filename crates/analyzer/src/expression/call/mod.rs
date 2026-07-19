@@ -80,6 +80,12 @@ fn analyze_invocation_targets<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
+    let stable_method_result = invocation_arguments.is_empty()
+        && !encountered_invalid_targets
+        && !encountered_mixed_targets
+        && !invocation_targets.is_empty()
+        && invocation_targets.iter().all(InvocationTarget::has_stable_method_result_contract);
+
     let method_name_for_assertions: Option<Word> = invocation_targets.iter().find_map(|target| {
         if let InvocationTarget::FunctionLike {
             identifier: FunctionLikeIdentifier::Method(_, _),
@@ -226,6 +232,10 @@ where
 
     let resulting_type =
         apply_method_call_assertions(context, block_context, this_variable, method_name_for_assertions, resulting_type);
+
+    if stable_method_result {
+        artifacts.stable_method_call_offsets.insert(call_span.start.offset);
+    }
 
     if resulting_type.is_never() && !block_context.flags.inside_loop() {
         artifacts.set_expression_type(&call_span, resulting_type);

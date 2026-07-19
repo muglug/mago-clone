@@ -31,6 +31,11 @@ pub struct AnalysisArtifacts {
     pub if_true_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub if_false_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
     pub true_branch_only_assertions: HashMap<(u32, u32), WordMap<AssertionSet>>,
+    /// Start offsets of zero-argument method calls whose resolved targets have
+    /// stable-result contracts. These offsets are advisory-only: they let
+    /// diagnostics explain why a repeated call was not narrowed, but never
+    /// participate in formulas, locals, or return-type inference.
+    pub stable_method_call_offsets: HashSet<u32>,
     pub inferred_return_types: Vec<Rc<TUnion>>,
     pub inferred_yield_key_types: Vec<TUnion>,
     pub inferred_yield_value_types: Vec<TUnion>,
@@ -67,6 +72,7 @@ impl AnalysisArtifacts {
             if_true_assertions: HashMap::default(),
             if_false_assertions: HashMap::default(),
             true_branch_only_assertions: HashMap::default(),
+            stable_method_call_offsets: HashSet::default(),
             symbol_references: SymbolReferences::new(),
             case_scopes: Vec::new(),
             loop_scope: None,
