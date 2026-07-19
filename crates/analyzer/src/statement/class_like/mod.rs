@@ -2664,6 +2664,61 @@ fn report_trait_property_conflict<A>(
     );
 }
 
+/// Returns whether a property type declared on a generic parent uses one of
+/// that parent's covariant template parameters.
+fn property_type_uses_covariant_template(
+    parent_metadata: &ClassLikeMetadata,
+    parent_property: &PropertyMetadata,
+) -> bool {
+    let Some(parent_type) = parent_property.type_metadata.as_ref() else {
+        return false;
+    };
+
+    parent_metadata.template_types.iter().enumerate().any(|(offset, (template_name, _))| {
+        parent_metadata.template_variance.get(offset).is_some_and(|variance| variance.is_covariant())
+            && type_contains_template_param(&parent_type.type_union, *template_name, parent_metadata.name)
+    })
+}
+
+/// Gets an inherited property with the extending class's template arguments
+/// substituted into its declared and effective types.
+fn get_substituted_property(
+    property: &PropertyMetadata,
+    class_like_metadata: &ClassLikeMetadata,
+    parent_class_name: Word,
+    codebase: &CodebaseMetadata,
+) -> PropertyMetadata {
+    let Some(mapping) = class_like_metadata.template_extended_parameters.get(&parent_class_name) else {
+        return property.clone();
+    };
+
+    if mapping.is_empty() {
+        return property.clone();
+    }
+
+    let mut template_result = TemplateResult::default();
+    for (template_name, concrete_type) in mapping {
+        template_result.add_lower_bound(
+            *template_name,
+            GenericParent::ClassLike(parent_class_name),
+            concrete_type.clone(),
+        );
+    }
+
+    let mut substituted_property = property.clone();
+    if let Some(type_metadata) = substituted_property.type_declaration_metadata.as_mut() {
+        type_metadata.type_union =
+            inferred_type_replacer::replace(&type_metadata.type_union, &template_result, codebase);
+    }
+
+    if let Some(type_metadata) = substituted_property.type_metadata.as_mut() {
+        type_metadata.type_union =
+            inferred_type_replacer::replace(&type_metadata.type_union, &template_result, codebase);
+    }
+
+    substituted_property
+}
+
 /// Apply template parameter substitution to a method's parameter and return types
 ///
 /// For example, if interface has `K` and `V` template parameters, and the implementation
@@ -3134,9 +3189,16 @@ fn check_class_like_properties<'ctx, A>(
                 continue;
             };
 
-            let Some(parent_property) = parent_metadata.properties.get(property_name) else {
+            let Some(unsubstituted_parent_property) = parent_metadata.properties.get(property_name) else {
                 continue;
             };
+
+            let parent_property = get_substituted_property(
+                unsubstituted_parent_property,
+                class_like_metadata,
+                parent_metadata.name,
+                context.codebase,
+            );
 
             if parent_property.read_visibility.is_private() && parent_property.write_visibility.is_private() {
                 continue;
@@ -3302,7 +3364,9 @@ fn check_class_like_properties<'ctx, A>(
             }
 
             // Check readonly modifier consistency
-            if property_metadata.flags.is_readonly() != parent_property.flags.is_readonly() {
+            if property_metadata.flags.is_readonly() != parent_property.flags.is_readonly()
+                && !parent_property.flags.is_docblock_readonly()
+            {
                 let property_span = property_metadata.name_span.unwrap_or(class_like_metadata.span);
                 let parent_property_span = parent_property.name_span.unwrap_or(parent_metadata.span);
 
@@ -3343,6 +3407,9 @@ fn check_class_like_properties<'ctx, A>(
             let parent_has_set_hook = parent_property.hooks.contains_key(&word("set"));
             let parent_only_get = parent_is_virtual && parent_has_get_hook && !parent_has_set_hook;
             let parent_only_set = parent_is_virtual && parent_has_set_hook && !parent_has_get_hook;
+            let parent_allows_covariance = parent_only_get
+                || parent_property.flags.is_docblock_readonly()
+                || property_type_uses_covariant_template(parent_metadata, unsubstituted_parent_property);
 
             let mut has_type_incompatibility = false;
             match (
@@ -3354,7 +3421,7 @@ fn check_class_like_properties<'ctx, A>(
                         context.codebase,
                         &declaring_type.type_union,
                         &parent_type.type_union,
-                        parent_only_get,
+                        parent_allows_covariance,
                         parent_only_set,
                     ) {
                         has_type_incompatibility = true;
@@ -3446,7 +3513,7 @@ fn check_class_like_properties<'ctx, A>(
                     context.codebase,
                     &declaring_type.type_union,
                     &parent_type.type_union,
-                    parent_only_get,
+                    parent_allows_covariance,
                     parent_only_set,
                 )
             {

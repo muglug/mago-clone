@@ -189,7 +189,7 @@ where
 
             artifacts.symbol_references.add_reference_to_symbol(&block_context.scope, fq_class_id, false);
 
-            if class_resolution.is_final
+            if (class_resolution.is_final && !class_resolution.is_static())
                 || class_resolution.is_from_literal_class_string()
                 || class_resolution.is_named()
             {

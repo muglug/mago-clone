@@ -7,6 +7,9 @@ pub struct MetadataFlags(u64);
 impl MetadataFlags {
     pub const ABSTRACT: MetadataFlags = MetadataFlags(1 << 0);
     pub const FINAL: MetadataFlags = MetadataFlags(1 << 1);
+    /// The property's readonly semantics came from a PHPDoc `@readonly` tag,
+    /// rather than PHP's native `readonly` modifier.
+    pub const DOCBLOCK_READONLY: MetadataFlags = MetadataFlags(1 << 2);
     pub const READONLY: MetadataFlags = MetadataFlags(1 << 3);
     pub const DEPRECATED: MetadataFlags = MetadataFlags(1 << 4);
     pub const ENUM_INTERFACE: MetadataFlags = MetadataFlags(1 << 5);
@@ -44,6 +47,10 @@ impl MetadataFlags {
     pub const EXPERIMENTAL: MetadataFlags = MetadataFlags(1 << 40);
     pub const POLYFILL: MetadataFlags = MetadataFlags(1 << 41);
     pub const PATCH: MetadataFlags = MetadataFlags(1 << 42);
+    /// The method body is exactly a parameterless `return $this->property;`
+    /// getter. This structural fact is used for diagnostics and does not imply
+    /// that call results are memoized by the analyzer.
+    pub const SIMPLE_PROPERTY_GETTER: MetadataFlags = MetadataFlags(1 << 43);
 }
 
 impl MetadataFlags {
@@ -174,6 +181,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_readonly(self) -> bool {
         self.contains(Self::READONLY)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_docblock_readonly(self) -> bool {
+        self.contains(Self::DOCBLOCK_READONLY)
     }
 
     #[inline]
@@ -312,6 +325,12 @@ impl MetadataFlags {
     #[must_use]
     pub const fn is_external_mutation_free(self) -> bool {
         self.contains(Self::EXTERNAL_MUTATION_FREE)
+    }
+
+    #[inline]
+    #[must_use]
+    pub const fn is_simple_property_getter(self) -> bool {
+        self.contains(Self::SIMPLE_PROPERTY_GETTER)
     }
 
     #[inline]

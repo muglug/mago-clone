@@ -61,12 +61,14 @@ pub fn is_contained_by(
                     &index_access_container.get_target_type().types,
                     &index_access_container.get_index_type().types,
                     false,
+                    codebase,
                 );
 
                 let input_indexed = TIndexAccess::get_indexed_access_result(
                     &index_access_input.get_target_type().types,
                     &index_access_input.get_index_type().types,
                     false,
+                    codebase,
                 );
 
                 match (container_indexed, input_indexed) {
@@ -92,7 +94,30 @@ pub fn is_contained_by(
                         }
                         true
                     }
-                    _ => false,
+                    _ => {
+                        // Keep unresolved indexed-access relationships
+                        // comparable structurally. The same template key can
+                        // carry a normalized constraint (`array-key`) on an
+                        // expression while the declaration retains its
+                        // `key-of<T>` origin; both still denote `T[K]`.
+                        union_comparator::is_contained_by(
+                            codebase,
+                            index_access_input.get_target_type(),
+                            index_access_container.get_target_type(),
+                            false,
+                            false,
+                            inside_assertion,
+                            atomic_comparison_result,
+                        ) && union_comparator::is_contained_by(
+                            codebase,
+                            index_access_input.get_index_type(),
+                            index_access_container.get_index_type(),
+                            false,
+                            false,
+                            inside_assertion,
+                            atomic_comparison_result,
+                        )
+                    }
                 }
             }
             (TDerived::PropertiesOf(properties_of_container), TDerived::PropertiesOf(properties_of_input)) => {
@@ -123,6 +148,7 @@ pub fn is_contained_by(
             &index_access.get_target_type().types,
             &index_access.get_index_type().types,
             false,
+            codebase,
         ),
         TDerived::New(new_type) => TNew::get_new_targets(&new_type.get_target_type().types, codebase),
         TDerived::TemplateType(template_type) => template_type.resolve(codebase),

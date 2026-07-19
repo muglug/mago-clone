@@ -1,6 +1,7 @@
 <?php
 
-class SimpleXMLElement implements Traversable, ArrayAccess, Countable, Iterator, Stringable, RecursiveIterator
+/** @implements RecursiveIterator<string, SimpleXMLElement> */
+class SimpleXMLElement implements ArrayAccess, Countable, Stringable, RecursiveIterator
 {
     /**
      * @throws Exception

@@ -121,9 +121,17 @@ pub(crate) fn is_contained_by(
             continue;
         }
 
+        // A literal produced by substituting an inferred template may be widened
+        // to the declared argument type (for example `Value<'x'>` inferred from
+        // `value('x')` when passed as `Value<string>`). Explicit generic
+        // arguments remain invariant.
+        let widens_inferred_literal = specialized_template_type.had_template()
+            && specialized_template_type.is_literal_of(container_type_parameter);
+
         if matches!(variance, Variance::Invariant)
             && !specialized_template_type.from_template_default()
             && !container_type_parameter.from_template_default()
+            && !widens_inferred_literal
         {
             let mut reverse_result = ComparisonResult::new();
             let reverse_ok = union_comparator::is_contained_by(
@@ -150,8 +158,7 @@ pub(crate) fn is_contained_by(
         if all_parameters_match
             && !specialized_template_type.has_template()
             && !container_type_parameter.has_template()
-            && (specialized_template_type.is_never()
-                || specialized_template_type.is_literal_of(container_type_parameter))
+            && (specialized_template_type.is_never() || widens_inferred_literal)
         {
             widen_input_param(atomic_comparison_result, input_type_part, parameter_offset, container_type_parameter);
         }

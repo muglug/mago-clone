@@ -512,6 +512,8 @@ where
 
             verify_argument_type(
                 context,
+                block_context,
+                artifacts,
                 &argument_value_type,
                 &final_parameter_type,
                 *argument_offset,
@@ -821,6 +823,8 @@ where
 
                         verify_argument_type(
                             context,
+                            block_context,
+                            artifacts,
                             &unpacked_element_type,
                             &final_variadic_parameter_type,
                             last_parameter_offset,
@@ -876,6 +880,8 @@ where
 
                         validate_unpacked_argument_elements(
                             context,
+                            block_context,
+                            artifacts,
                             &argument_value_type,
                             argument_expression,
                             base_class_metadata,
@@ -898,11 +904,14 @@ where
         } else if !unpacked_arguments.is_empty() {
             context.collector.report_with_code(
                 IssueCode::TooManyArguments,
-                Issue::error(format!(
-                    "Cannot unpack arguments into {} `{}` which expects no arguments.",
-                    invocation.target.guess_kind(),
-                    invocation.target.guess_name(context)
-                ))
+                argument_count_issue(
+                    format!(
+                        "Cannot unpack arguments into {} `{}` which expects no arguments.",
+                        invocation.target.guess_kind(),
+                        invocation.target.guess_name(context)
+                    ),
+                    invocation.argument_count_mismatch_is_possible,
+                )
                 .with_annotation(
                     Annotation::primary(unpacked_arguments[0].span()).with_message("Unexpected argument unpacking"),
                 )
@@ -935,7 +944,7 @@ where
         };
 
         let total_positions = non_closure_arguments.len() + closure_arguments.len();
-        let mut issue = Issue::error(main_message)
+        let mut issue = argument_count_issue(main_message, invocation.argument_count_mismatch_is_possible)
             .with_annotation(Annotation::primary(primary_annotation_span).with_message("More arguments expected here"))
             .with_note(format!(
                 "Expected at least {number_of_required_parameters} argument(s) for non-optional parameters, but received {}.",
@@ -992,9 +1001,10 @@ where
             _ => format!("Too many arguments provided for {target_kind_str} `{target_name_str}`."),
         };
 
-        let mut issue = Issue::error(main_message).with_annotation(
-            Annotation::primary(first_extra_arg_span).with_message("Unexpected argument provided here"),
-        );
+        let mut issue = argument_count_issue(main_message, invocation.argument_count_mismatch_is_possible)
+            .with_annotation(
+                Annotation::primary(first_extra_arg_span).with_message("Unexpected argument provided here"),
+            );
 
         issue = match invocation.arguments_source {
             InvocationArgumentsSource::PipeInput(pipe) => issue
@@ -1023,6 +1033,10 @@ where
     check_template_result(context, template_result, invocation.span);
 
     Ok(())
+}
+
+fn argument_count_issue(message: String, mismatch_is_possible: bool) -> Issue {
+    if mismatch_is_possible { Issue::warning(message) } else { Issue::error(message) }
 }
 
 /// Gets the effective parameter type, expanding class-relative types based on call context.
@@ -1078,6 +1092,8 @@ where
 /// Validates individual elements within unpacked arrays against their corresponding parameters.
 fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     argument_value_type: &TUnion,
     argument_expression: &Expression<'arena>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1144,6 +1160,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
                             verify_argument_type(
                                 context,
+                                block_context,
+                                artifacts,
                                 element_type,
                                 &final_parameter_type,
                                 parameter_position,
@@ -1197,6 +1215,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
                             verify_argument_type(
                                 context,
+                                block_context,
+                                artifacts,
                                 element_type,
                                 &final_parameter_type,
                                 parameter_position,
@@ -1210,6 +1230,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
             TArray::Keyed(keyed_array) => {
                 validate_keyed_array_elements(
                     context,
+                    block_context,
+                    artifacts,
                     keyed_array,
                     argument_expression,
                     base_class_metadata,
@@ -1228,6 +1250,8 @@ fn validate_unpacked_argument_elements<'ctx, 'arena, A>(
 
 fn validate_keyed_array_elements<'ctx, 'arena, A>(
     context: &mut Context<'ctx, 'arena, A>,
+    block_context: &BlockContext<'ctx>,
+    artifacts: &AnalysisArtifacts,
     keyed_array: &mago_codex::ttype::atomic::array::keyed::TKeyedArray,
     argument_expression: &Expression<'arena>,
     base_class_metadata: Option<&'ctx ClassLikeMetadata>,
@@ -1305,6 +1329,8 @@ fn validate_keyed_array_elements<'ctx, 'arena, A>(
 
             verify_argument_type(
                 context,
+                block_context,
+                artifacts,
                 element_type,
                 &final_parameter_type,
                 parameter_position,

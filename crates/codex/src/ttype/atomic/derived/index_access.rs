@@ -3,11 +3,14 @@ use std::sync::Arc;
 use mago_word::Word;
 use mago_word::concat_word;
 
+use crate::metadata::CodebaseMetadata;
 use crate::ttype::TType;
 use crate::ttype::TypeRef;
 use crate::ttype::atomic::TAtomic;
 use crate::ttype::atomic::array::TArray;
 use crate::ttype::atomic::array::key::ArrayKey;
+use crate::ttype::comparator::ComparisonResult;
+use crate::ttype::comparator::union_comparator;
 use crate::ttype::union::TUnion;
 
 /// Represents an indexed access type `T[K]`.
@@ -53,6 +56,7 @@ impl TIndexAccess {
         target_types: &[TAtomic],
         index_types: &[TAtomic],
         retain_generics: bool,
+        codebase: &CodebaseMetadata,
     ) -> Option<TUnion> {
         let mut indexed_values = vec![];
         for target_type in target_types {
@@ -64,6 +68,7 @@ impl TIndexAccess {
                         std::slice::from_ref(target_type),
                         index_parameter.get_constraint().types.as_ref(),
                         retain_generics,
+                        codebase,
                     ) {
                         indexed_values.extend(generic_indexed_values.types.into_owned());
                     }
@@ -72,44 +77,48 @@ impl TIndexAccess {
                 }
 
                 match target_type {
-                    TAtomic::Array(target_array) => {
-                        let Some(array_key) = index_type.to_array_key() else {
-                            continue 'indices;
-                        };
+                    TAtomic::Array(target_array) => match target_array {
+                        TArray::List(list_array) => {
+                            let known_element = match index_type.to_array_key() {
+                                Some(ArrayKey::Integer(target_index)) if target_index >= 0 => list_array
+                                    .known_elements
+                                    .as_ref()
+                                    .and_then(|known_elements| known_elements.get(&(target_index as usize))),
+                                _ => None,
+                            };
 
-                        match target_array {
-                            TArray::List(list_array) => {
-                                let ArrayKey::Integer(target_index) = array_key else {
-                                    continue 'indices;
-                                };
-
-                                if target_index < 0 {
-                                    continue 'indices;
-                                }
-
-                                let Some(known_elements) = list_array.known_elements.as_ref() else {
-                                    continue 'indices;
-                                };
-
-                                let Some((_, known_element_type)) = known_elements.get(&(target_index as usize)) else {
-                                    continue 'indices;
-                                };
-
+                            if let Some((_, known_element_type)) = known_element {
                                 indexed_values.extend(known_element_type.types.iter().cloned());
-                            }
-                            TArray::Keyed(keyed_array) => {
-                                let Some(known_items) = keyed_array.known_items.as_ref() else {
-                                    continue 'indices;
-                                };
-
-                                let Some((_, known_item_type)) = known_items.get(&array_key) else {
-                                    continue 'indices;
-                                };
-
-                                indexed_values.extend(known_item_type.types.iter().cloned());
+                            } else if index_type.is_int() {
+                                indexed_values.extend(list_array.element_type.types.iter().cloned());
                             }
                         }
-                    }
+                        TArray::Keyed(keyed_array) => {
+                            let known_item = index_type.to_array_key().and_then(|array_key| {
+                                keyed_array.known_items.as_ref().and_then(|known_items| known_items.get(&array_key))
+                            });
+
+                            if let Some((_, known_item_type)) = known_item {
+                                indexed_values.extend(known_item_type.types.iter().cloned());
+                            } else if keyed_array.known_items.is_none()
+                                && let Some((key_type, value_type)) = keyed_array.get_generic_parameters()
+                                && !value_type.is_mixed()
+                            {
+                                let index_union = TUnion::from_atomic(index_type.clone());
+                                if union_comparator::is_contained_by(
+                                    codebase,
+                                    &index_union,
+                                    key_type,
+                                    false,
+                                    false,
+                                    true,
+                                    &mut ComparisonResult::new(),
+                                ) {
+                                    indexed_values.extend(value_type.types.iter().cloned());
+                                }
+                            }
+                        }
+                    },
                     TAtomic::GenericParameter(parameter) => {
                         if retain_generics {
                             indexed_values.push(TAtomic::GenericParameter(parameter.clone()));
@@ -117,6 +126,7 @@ impl TIndexAccess {
                             parameter.get_constraint().types.as_ref(),
                             index_types,
                             retain_generics,
+                            codebase,
                         ) {
                             indexed_values.extend(generic_indexed_values.types.into_owned());
                         }

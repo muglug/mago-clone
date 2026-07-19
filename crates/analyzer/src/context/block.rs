@@ -52,6 +52,18 @@ pub struct ReferenceConstraint {
     pub constraint_type: Option<Rc<TUnion>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardedExpressionKind {
+    MethodCall,
+    PropertyFetch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GuardedExpression {
+    pub condition_span: Span,
+    pub kind: GuardedExpressionKind,
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockContext<'ctx> {
     pub scope: ScopeContext<'ctx>,
@@ -133,6 +145,12 @@ pub struct BlockContext<'ctx> {
     /// Key: method call expression id (e.g., "$statements->first()")
     /// Value: assertion set to apply to the method's return type
     pub active_method_call_assertions: WordMap<AssertionSet>,
+
+    /// Expressions whose value was checked by an earlier condition on the
+    /// current control-flow path, but whose later evaluation is intentionally
+    /// not memoized. This is diagnostic provenance only and must never be used
+    /// to reconcile a type.
+    pub guarded_expressions: WordMap<GuardedExpression>,
 }
 
 impl BreakContext {
@@ -212,6 +230,7 @@ impl<'ctx> BlockContext<'ctx> {
             called_methods: HashSet::default(),
             calls_parent_initializer: None,
             active_method_call_assertions: WordMap::default(),
+            guarded_expressions: WordMap::default(),
         };
 
         if register_super_globals {

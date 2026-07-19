@@ -20,6 +20,7 @@ use crate::artifacts::AnalysisArtifacts;
 use crate::code::IssueCode;
 use crate::context::Context;
 use crate::context::block::BlockContext;
+use crate::context::block::BreakContext;
 use crate::context::scope::control_action::ControlAction;
 use crate::error::AnalysisError;
 
@@ -60,48 +61,55 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
             None => 1,
         };
 
-        let mut i = levels;
+        if levels < 1 {
+            context.collector.report_with_code(
+                IssueCode::InvalidContinue,
+                Issue::error("Continue level must be greater than zero.").with_annotation(
+                    Annotation::primary(self.level.as_ref().map_or_else(|| self.span(), HasSpan::span))
+                        .with_message("This level does not identify an enclosing loop or switch."),
+                ),
+            );
+
+            block_context.flags.set_has_returned(true);
+            return Ok(());
+        }
+
+        let requested_levels = levels as usize;
+        let actual_levels_available = block_context.break_types.len();
+        if requested_levels > actual_levels_available {
+            let issue = Issue::error(format!(
+                "Cannot continue {levels} levels - only {actual_levels_available} enclosing loop{} or switch{} available.",
+                if actual_levels_available == 1 { "" } else { "s" },
+                if actual_levels_available == 1 { " is" } else { "es are" },
+            ))
+            .with_annotation(
+                Annotation::primary(self.level.as_ref().map_or_else(|| self.span(), HasSpan::span)).with_message(
+                    format!("Continue level must be less than or equal to {actual_levels_available}."),
+                ),
+            );
+
+            context.collector.report_with_code(IssueCode::InvalidContinue, issue);
+            block_context.flags.set_has_returned(true);
+            return Ok(());
+        }
+
+        let target_break_context = &block_context.break_types[actual_levels_available - requested_levels];
+        let target_is_switch = matches!(target_break_context, BreakContext::Switch);
+        let target_loop_depth = block_context
+            .break_types
+            .iter()
+            .rev()
+            .take(requested_levels)
+            .filter(|break_context| matches!(break_context, BreakContext::Loop))
+            .count();
+
+        // Switches count toward PHP's numeric continue level, but do not own a
+        // LoopScope. A continue targeting a switch uses the nearest loop scope
+        // only to communicate the case's LeaveSwitch action.
+        let loop_scope_depth = target_loop_depth.max(1);
         let mut loop_scope_ref = artifacts.loop_scope.as_mut();
-        let mut loop_spans = vec![];
-        while let Some(loop_scope) = loop_scope_ref.take() {
-            loop_spans.push(loop_scope.span);
-
-            if i > 1 && loop_scope.parent_loop.is_some() {
-                i -= 1;
-                loop_scope_ref = loop_scope.parent_loop.as_deref_mut();
-            } else if i > 1 && loop_scope.parent_loop.is_none() {
-                let actual_levels_available = levels - i + 1;
-                let error_message = format!(
-                    "Cannot continue {} levels - only {} enclosing loop{} available.",
-                    levels,
-                    actual_levels_available,
-                    if actual_levels_available == 1 { "" } else { "s" }
-                );
-
-                let mut issue = Issue::error(error_message);
-                if let Some(level) = &self.level {
-                    issue = issue.with_annotation(Annotation::primary(level.span()).with_message(format!(
-                        "Continue level must be less than or equal to {actual_levels_available}."
-                    )));
-                }
-
-                for (i, loop_span) in loop_spans.into_iter().enumerate() {
-                    issue = issue.with_annotation(
-                        Annotation::secondary(loop_span)
-                            .with_message(format!("This is the {} enclosing loop.", get_ordinal_string(i + 1))),
-                    );
-                }
-
-                context.collector.report_with_code(IssueCode::InvalidContinue, issue);
-
-                block_context.flags.set_has_returned(true);
-
-                return Ok(());
-            } else {
-                loop_scope_ref = Some(loop_scope);
-
-                break;
-            }
+        for _ in 1..loop_scope_depth {
+            loop_scope_ref = loop_scope_ref.and_then(|loop_scope| loop_scope.parent_loop.as_deref_mut());
         }
 
         let Some(loop_scope) = loop_scope_ref else {
@@ -118,7 +126,7 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
             return Ok(());
         };
 
-        if block_context.break_types.last().is_some_and(crate::context::block::BreakContext::is_switch) && levels < 2 {
+        if target_is_switch {
             loop_scope.final_actions.insert(ControlAction::LeaveSwitch);
         } else {
             loop_scope.final_actions.insert(ControlAction::Continue);
@@ -192,26 +200,5 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Continue<'arena> {
         block_context.flags.set_has_returned(true);
 
         Ok(())
-    }
-}
-
-fn get_ordinal_string(n: usize) -> String {
-    match n {
-        1 => "first".to_string(),
-        2 => "second".to_string(),
-        3 => "third".to_string(),
-        4 => "fourth".to_string(),
-        5 => "fifth".to_string(),
-        _ => {
-            // Handle general cases with suffixes
-            let suffix = match n % 10 {
-                1 if n % 100 != 11 => "st",
-                2 if n % 100 != 12 => "nd",
-                3 if n % 100 != 13 => "rd",
-                _ => "th",
-            };
-
-            format!("{n}{suffix}")
-        }
     }
 }

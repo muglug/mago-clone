@@ -35,6 +35,7 @@ use crate::context::Context;
 use crate::context::block::BlockContext;
 use crate::context::utils::inherit_branch_context_properties;
 use crate::error::AnalysisError;
+use crate::formula::get_disjunctive_equality_formula;
 use crate::formula::get_formula;
 use crate::formula::negate_or_synthesize;
 use crate::reconciler::reconcile_keyed_types;
@@ -159,6 +160,7 @@ where
             let is_last_arm = i == last_expression_arm_index && first_default_arm.is_none();
             let (arm_status, new_else_clauses) = self.analyze_expression_arm(
                 &subject_for_conditions,
+                is_synthetic,
                 expression_arm,
                 &mut running_else_context,
                 &mut arm_body_types,
@@ -284,6 +286,7 @@ where
     fn analyze_expression_arm(
         &mut self,
         subject_expr: &Expression<'arena>,
+        subject_is_synthetic: bool,
         expression_arm: &MatchExpressionArm<'arena>,
         running_else_context: &mut BlockContext<'ctx>,
         arm_body_types: &mut Vec<Rc<TUnion>>,
@@ -338,7 +341,7 @@ where
         let mut arm_body_context = running_else_context.clone();
         let assertion_context = self.context.get_assertion_context_from_block(&arm_body_context);
 
-        let arm_clauses = get_formula(
+        let subject_arm_clauses = get_formula(
             expression_arm.span(),
             expression_arm.span(),
             &arm_condition,
@@ -348,6 +351,36 @@ where
             self.context.settings.formula_size_threshold,
         )
         .unwrap_or_default();
+
+        // A synthetic subject preserves the fact that PHP evaluates a match
+        // subject exactly once, but it hides relations between derived
+        // subjects and their source variables. Build the same variable-free
+        // equality formula Pzoom uses from the original subject as a second
+        // view. This recovers assertions such as `count($items) === 0`
+        // narrowing `$items`, and `get_class($value) === Foo::class`
+        // narrowing `$value`, without memoizing a later call result.
+        let source_arm_clauses = if subject_is_synthetic {
+            get_disjunctive_equality_formula(
+                self.stmt.expression,
+                expression_arm.conditions.iter().copied().collect(),
+                self.context.get_assertion_context_from_block(&arm_body_context),
+                self.artifacts,
+                true,
+                &self.context.settings.algebra_thresholds(),
+                self.context.settings.formula_size_threshold,
+            )
+            .filter(|clauses| {
+                clauses.iter().any(|clause| {
+                    clause.possibilities.keys().any(|variable_id| !variable_id.as_bytes().starts_with(b"*"))
+                })
+            })
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let mut arm_clauses = subject_arm_clauses.clone();
+        arm_clauses.extend(source_arm_clauses.iter().cloned());
 
         let combined_clauses: Vec<_> = saturate_clauses(
             arm_clauses.iter().chain(arm_body_context.clauses.iter().map(Deref::deref)),
@@ -391,14 +424,32 @@ where
         );
         arm_exit_contexts.push(arm_body_context);
 
-        let negated_arm_clauses = negate_or_synthesize(
-            arm_clauses,
+        let mut negated_arm_clauses = negate_or_synthesize(
+            subject_arm_clauses,
             &arm_condition,
             self.context.get_assertion_context_from_block(running_else_context),
             self.artifacts,
             &self.context.settings.algebra_thresholds(),
             self.context.settings.formula_size_threshold,
         );
+
+        if !source_arm_clauses.is_empty() {
+            let source_arm_condition = new_synthetic_disjunctive_identity(
+                self.context.arena,
+                self.stmt.expression,
+                expression_arm.conditions.get(0).unwrap(),
+                expression_arm.conditions.iter().skip(1).copied().collect(),
+            );
+
+            negated_arm_clauses.extend(negate_or_synthesize(
+                source_arm_clauses,
+                &source_arm_condition,
+                self.context.get_assertion_context_from_block(running_else_context),
+                self.artifacts,
+                &self.context.settings.algebra_thresholds(),
+                self.context.settings.formula_size_threshold,
+            ));
+        }
 
         running_else_context.clauses = saturate_clauses(
             running_else_context.clauses.iter().map(Deref::deref).chain(negated_arm_clauses.iter()),

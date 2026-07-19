@@ -49,6 +49,9 @@ pub struct Invocation<'ctx, 'ast, 'arena> {
     pub arguments_source: InvocationArgumentsSource<'ast, 'arena>,
     /// The source span of the entire invocation.
     pub span: Span,
+    /// The argument count is invalid for this target but valid for another
+    /// possible runtime target of the same call.
+    pub argument_count_mismatch_is_possible: bool,
 }
 
 /// Context information for method call resolution.
@@ -159,7 +162,13 @@ pub struct InvocationTargetParametersIter<'target, 'ctx> {
 
 impl<'ctx, 'ast, 'arena> Invocation<'ctx, 'ast, 'arena> {
     pub fn new(target: InvocationTarget<'ctx>, arguments: InvocationArgumentsSource<'ast, 'arena>, span: Span) -> Self {
-        Self { target, arguments_source: arguments, span }
+        Self { target, arguments_source: arguments, span, argument_count_mismatch_is_possible: false }
+    }
+
+    #[inline]
+    pub fn with_possible_argument_count_mismatch(mut self, is_possible: bool) -> Self {
+        self.argument_count_mismatch_is_possible = is_possible;
+        self
     }
 }
 
@@ -212,6 +221,37 @@ impl<'ctx> InvocationTarget<'ctx> {
                     || metadata.flags.is_external_mutation_free()
             }
         }
+    }
+
+    /// Whether a zero-argument method result is stable enough that analyzers
+    /// such as Pzoom/Psalm would reuse a previous narrowing. Mago deliberately
+    /// does not reuse the value; this classification exists solely to provide
+    /// a targeted diagnostic when a repeated evaluation loses that narrowing.
+    pub fn has_stable_method_result_contract(&self) -> bool {
+        let InvocationTarget::FunctionLike { metadata, method_context: Some(method_context), .. } = self else {
+            return false;
+        };
+
+        let Some(method_metadata) = metadata.method_metadata.as_ref() else {
+            return false;
+        };
+
+        if method_metadata.is_static {
+            return false;
+        }
+
+        let declared_stable = metadata.flags.is_pure()
+            || metadata.flags.is_mutation_free()
+            || method_context.class_like_metadata.flags.is_mutation_free();
+        if declared_stable {
+            return true;
+        }
+
+        metadata.flags.is_simple_property_getter()
+            && (method_metadata.is_final
+                || method_metadata.visibility.is_private()
+                || method_context.class_like_metadata.flags.is_final()
+                || method_context.class_like_metadata.flags.is_mutation_free())
     }
 
     /// Checks if the target is a dynamic callable that is not explicitly a closure type.

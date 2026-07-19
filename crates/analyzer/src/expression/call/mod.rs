@@ -80,6 +80,12 @@ fn analyze_invocation_targets<'ctx, 'ast, 'arena, A>(
 where
     A: Arena,
 {
+    let stable_method_result = invocation_arguments.is_empty()
+        && !encountered_invalid_targets
+        && !encountered_mixed_targets
+        && !invocation_targets.is_empty()
+        && invocation_targets.iter().all(InvocationTarget::has_stable_method_result_contract);
+
     let method_name_for_assertions: Option<Word> = invocation_targets.iter().find_map(|target| {
         if let InvocationTarget::FunctionLike {
             identifier: FunctionLikeIdentifier::Method(_, _),
@@ -93,6 +99,9 @@ where
             None
         }
     });
+
+    let has_alternative_with_valid_argument_count = invocation_targets.len() > 1
+        && invocation_targets.iter().any(|target| target_accepts_simple_argument_count(target, invocation_arguments));
 
     let mut resulting_type = None;
     for target in invocation_targets {
@@ -137,7 +146,10 @@ where
             }
         }
 
-        let invocation: Invocation<'ctx, 'ast, 'arena> = Invocation::new(target, invocation_arguments, call_span);
+        let argument_count_mismatch_is_possible = has_alternative_with_valid_argument_count
+            && !target_accepts_simple_argument_count(&target, invocation_arguments);
+        let invocation: Invocation<'ctx, 'ast, 'arena> = Invocation::new(target, invocation_arguments, call_span)
+            .with_possible_argument_count_mismatch(argument_count_mismatch_is_possible);
         let mut argument_types = WordMap::default();
 
         analyze_invocation(
@@ -221,6 +233,10 @@ where
     let resulting_type =
         apply_method_call_assertions(context, block_context, this_variable, method_name_for_assertions, resulting_type);
 
+    if stable_method_result {
+        artifacts.stable_method_call_offsets.insert(call_span.start.offset);
+    }
+
     if resulting_type.is_never() && !block_context.flags.inside_loop() {
         artifacts.set_expression_type(&call_span, resulting_type);
 
@@ -231,6 +247,26 @@ where
     artifacts.set_expression_type(&call_span, resulting_type);
 
     Ok(())
+}
+
+/// Checks the arity envelope for calls whose arguments have an exact positional
+/// count. Named and unpacked arguments keep the normal per-target validation.
+fn target_accepts_simple_argument_count(
+    target: &InvocationTarget<'_>,
+    arguments: InvocationArgumentsSource<'_, '_>,
+) -> bool {
+    if matches!(arguments, InvocationArgumentsSource::PartialArgumentList(_))
+        || arguments.iter_arguments().any(|argument| !argument.is_positional() || argument.is_unpacked())
+    {
+        return false;
+    }
+
+    let required =
+        target.iter_parameters().filter(|parameter| !parameter.has_default() && !parameter.is_variadic()).count();
+    let accepts_extra = target.iter_parameters().any(|parameter| parameter.is_variadic());
+    let provided = arguments.argument_count();
+
+    provided >= required && (accepts_extra || provided <= target.parameter_count())
 }
 
 /// Applies active method call assertions to narrow the return type.

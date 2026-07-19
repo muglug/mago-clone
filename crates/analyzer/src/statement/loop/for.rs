@@ -19,7 +19,9 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for For<'arena> {
     where
         A: Arena,
     {
-        let infinite_loop = self.initializations.is_empty() && self.conditions.is_empty() && self.increments.is_empty();
+        // An omitted condition is equivalent to `true`; initializers and
+        // increments do not make such a loop capable of terminating.
+        let infinite_loop = self.conditions.is_empty();
 
         r#loop::analyze_for_or_while_loop(
             context,

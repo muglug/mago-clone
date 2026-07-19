@@ -146,6 +146,10 @@ pub enum StaticClassType {
     None,
     Name(Word),
     Object(TObject),
+    /// A method receiver whose concrete runtime class is represented by a
+    /// template parameter. This lets `static`/`$this` returns preserve the
+    /// receiver identity instead of collapsing to the template constraint.
+    Generic(TGenericParameter),
 }
 
 #[derive(Debug)]
@@ -271,7 +275,26 @@ pub(crate) fn expand_atomic(
             }
         },
         TAtomic::Object(object) => {
-            expand_object(object, codebase, options);
+            let generic_static = match (&*object, &options.static_class_type) {
+                (TObject::Named(named), StaticClassType::Generic(parameter))
+                    if named.is_static
+                        || named.is_this
+                        || matches!(
+                            classify_special_class_name(named.name.as_bytes()),
+                            SpecialClassName::Static | SpecialClassName::This
+                        ) =>
+                {
+                    Some(parameter.clone())
+                }
+                _ => None,
+            };
+
+            if let Some(parameter) = generic_static {
+                *skip_key = true;
+                new_return_type_parts.push(TAtomic::GenericParameter(parameter));
+            } else {
+                expand_object(object, codebase, options);
+            }
         }
         TAtomic::Callable(TCallable::Signature(signature)) => {
             if let Some(return_type) = signature.get_return_type_mut() {
@@ -1035,7 +1058,8 @@ fn expand_index_access(
     let mut index_type = return_type_index_access.get_index_type().clone();
     expand_union(codebase, &mut index_type, options);
 
-    let Some(new_return_types) = TIndexAccess::get_indexed_access_result(&target_type.types, &index_type.types, false)
+    let Some(new_return_types) =
+        TIndexAccess::get_indexed_access_result(&target_type.types, &index_type.types, false, codebase)
     else {
         return vec![TAtomic::Derived(TDerived::IndexAccess(return_type_index_access.clone()))];
     };

@@ -30,6 +30,7 @@ use mago_span::Span;
 
 use crate::reconciler::Context;
 use crate::reconciler::assertion_reconciler::intersect_atomic_with_atomic;
+use crate::reconciler::map_generic_constraint;
 use crate::reconciler::simple_negated_assertion_reconciler;
 use crate::reconciler::trigger_issue_for_impossible;
 
@@ -134,6 +135,27 @@ fn subtract_complex_type<A>(
     let existing_atomic_types = std::mem::take(existing_var_type.types.to_mut());
 
     for existing_atomic in existing_atomic_types {
+        if let TAtomic::GenericParameter(parameter) = &existing_atomic {
+            let before = parameter.constraint.clone();
+            let narrowed = map_generic_constraint(parameter, |constraint| {
+                let mut narrowed = constraint.clone();
+                let mut constraint_changed = false;
+                subtract_complex_type(context, assertion_type, &mut narrowed, &mut constraint_changed);
+                *can_be_disjunct |= constraint_changed || narrowed != *constraint;
+                narrowed
+            });
+
+            if let Some(narrowed) = narrowed {
+                acceptable_types.push(narrowed);
+            } else if before.is_never() {
+                acceptable_types.push(existing_atomic);
+            } else {
+                *can_be_disjunct = true;
+            }
+
+            continue;
+        }
+
         if &existing_atomic == assertion_type {
             *can_be_disjunct = true;
 

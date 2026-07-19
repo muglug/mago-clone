@@ -1,7 +1,10 @@
 use mago_allocator::Arena;
 use std::rc::Rc;
 
+use mago_codex::ttype::atomic::TAtomic;
+use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::get_mixed;
+use mago_codex::ttype::union::TUnion;
 use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
@@ -63,6 +66,19 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
         let mut loop_block_context = block_context.clone();
         loop_block_context.flags.set_inside_loop(true);
         loop_block_context.break_types.push(BreakContext::Loop);
+
+        // Reaching the body proves that the iterated array has at least one
+        // element, even when the loop itself was not guaranteed to execute.
+        // Keep that fact local to the body; it must not leak to the normal
+        // exit path of a possibly-empty foreach.
+        if let Some(iterator_variable_id) = iterator_variable_id
+            && let Some(iterator_type) = loop_block_context.locals.get(&iterator_variable_id)
+        {
+            let mut non_empty_iterator_type = (**iterator_type).clone();
+            if mark_array_atomics_non_empty(&mut non_empty_iterator_type) {
+                loop_block_context.locals.insert(iterator_variable_id, Rc::new(non_empty_iterator_type));
+            }
+        }
 
         if let Some(key_expression) = self.target.key() {
             let key_expression_id = get_expression_id(
@@ -176,6 +192,29 @@ impl<'ast, 'arena> Analyzable<'ast, 'arena> for Foreach<'arena> {
 
         Ok(())
     }
+}
+
+fn mark_array_atomics_non_empty(union: &mut TUnion) -> bool {
+    let mut changed = false;
+    for atomic in union.types.to_mut() {
+        let TAtomic::Array(array) = atomic else {
+            continue;
+        };
+
+        match array {
+            TArray::List(list) if !list.non_empty => {
+                list.non_empty = true;
+                changed = true;
+            }
+            TArray::Keyed(keyed) if !keyed.non_empty => {
+                keyed.non_empty = true;
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    changed
 }
 
 #[cfg(test)]

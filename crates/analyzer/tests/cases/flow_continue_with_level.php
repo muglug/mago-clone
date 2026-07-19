@@ -20,3 +20,25 @@ function flow_continue_with_level(array $matrix, int $threshold): int
 
     return $count;
 }
+
+/** @param list<string> $values */
+function flow_continue_counts_switch_as_level(array $values): int
+{
+    $result = 0;
+    foreach ($values as $value) {
+        switch ($value) {
+            case 'one':
+                $current = 1;
+                break;
+            case 'two':
+                $current = 2;
+                break;
+            default:
+                continue 2;
+        }
+
+        $result += $current;
+    }
+
+    return $result;
+}

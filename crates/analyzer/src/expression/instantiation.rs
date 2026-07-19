@@ -21,6 +21,8 @@ use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
 use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
+use mago_codex::ttype::expander::TypeExpansionOptions;
+use mago_codex::ttype::expander::expand_union;
 use mago_codex::ttype::get_never;
 use mago_codex::ttype::get_object;
 use mago_codex::ttype::template::GenericTemplate;
@@ -348,6 +350,7 @@ where
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
             span: instantiation_span,
+            argument_count_mismatch_is_possible: false,
         };
 
         let mut argument_types = WordMap::default();
@@ -384,7 +387,7 @@ where
         }
 
         let mut resolved_template_types = vec![];
-        for (offset, (template_name, _)) in metadata.template_types.iter().enumerate() {
+        for (offset, (template_name, template)) in metadata.template_types.iter().enumerate() {
             let mut template_type = if let Some(lower_bounds) =
                 template_result.get_lower_bounds_for_class_like(*template_name, metadata.name)
             {
@@ -422,7 +425,14 @@ where
             };
 
             let variance = metadata.template_variance.get(offset).copied().unwrap_or(Variance::Invariant);
-            if matches!(variance, Variance::Invariant) {
+            let mut expanded_constraint = template.constraint.clone();
+            expand_union(
+                context.codebase,
+                &mut expanded_constraint,
+                &TypeExpansionOptions { self_class: Some(metadata.name), ..Default::default() },
+            );
+
+            if matches!(variance, Variance::Invariant) && !expanded_constraint.has_literal_value() {
                 template_type.widen_scalars();
             }
 
@@ -590,6 +600,7 @@ where
                 None => InvocationArgumentsSource::None(instantiation_span),
             },
             span: instantiation_span,
+            argument_count_mismatch_is_possible: false,
         };
 
         let mut template_result =

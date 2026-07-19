@@ -12,6 +12,7 @@ use mago_codex::ttype::atomic::generic::TGenericParameter;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::r#enum::TEnum;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
+use mago_codex::ttype::atomic::scalar::class_like_string::TClassLikeString;
 use mago_codex::ttype::expander::StaticClassType;
 use mago_codex::ttype::get_specialized_template_type;
 use mago_codex::ttype::union::TUnion;
@@ -65,6 +66,18 @@ where
     let mut result = MethodResolutionResult::default();
 
     let class_resolutions = resolve_classnames_from_expression(context, block_context, artifacts, class_expr, false)?;
+    let generic_receiver =
+        artifacts.get_expression_type(class_expr).and_then(|class_type| match class_type.get_single() {
+            TAtomic::GenericParameter(parameter) => Some(parameter.clone()),
+            TAtomic::Scalar(mago_codex::ttype::atomic::scalar::TScalar::ClassLikeString(
+                TClassLikeString::Generic { parameter_name, defining_entity, constraint, .. },
+            )) => Some(TGenericParameter::new(
+                *parameter_name,
+                Arc::new(TUnion::from_atomic((**constraint).clone())),
+                *defining_entity,
+            )),
+            _ => None,
+        });
     if let Some(class_type) = artifacts.get_expression_type(class_expr)
         && class_type.is_nullable()
     {
@@ -95,7 +108,7 @@ where
         }
 
         for method_name in &method_names {
-            let resolved_methods = resolve_method_from_classname(
+            let mut resolved_methods = resolve_method_from_classname(
                 context,
                 block_context,
                 block_context.scope.get_class_like(),
@@ -107,6 +120,12 @@ where
                 method_selector,
                 access_span,
             );
+
+            if let Some(generic_receiver) = &generic_receiver {
+                for resolved in &mut resolved_methods {
+                    resolved.static_class_type = StaticClassType::Generic(generic_receiver.clone());
+                }
+            }
 
             result.resolved_methods.extend(resolved_methods);
         }
@@ -524,7 +543,14 @@ where
                     .template_types
                     .iter()
                     .map(|(&parameter_name, template)| {
-                        if let Some(parameter) = get_specialized_template_type(
+                        if class_like_metadata.name == current_class_metadata.name {
+                            wrap_atomic(TAtomic::GenericParameter(TGenericParameter {
+                                parameter_name,
+                                constraint: Arc::new(template.constraint.clone()),
+                                defining_entity: template.defining_entity,
+                                intersection_types: None,
+                            }))
+                        } else if let Some(parameter) = get_specialized_template_type(
                             context.codebase,
                             parameter_name,
                             class_like_metadata.name,

@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use foldhash::HashMap;
+use foldhash::HashSet;
 
 use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::metadata::CodebaseMetadata;
@@ -159,6 +160,52 @@ pub fn get_expression_id<'ast, 'arena>(
     codebase: Option<&CodebaseMetadata>,
 ) -> Option<Word> {
     get_extended_expression_id(expression, this_class_name, resolved_names, codebase, false)
+}
+
+/// Returns a canonical access-path key for a zero-argument method call whose
+/// target was classified as stable during invocation analysis.
+///
+/// Unlike an ordinary expression ID, this key is diagnostic-only. Callers must
+/// not use it as a local variable or formula subject because each invocation is
+/// still analyzed as a distinct runtime evaluation.
+pub fn get_stable_method_call_advisory_id<'ast, 'arena>(
+    expression: &'ast Expression<'arena>,
+    this_class_name: Option<Word>,
+    resolved_names: &'ast ResolvedNames<'arena>,
+    codebase: Option<&CodebaseMetadata>,
+    stable_method_call_offsets: &HashSet<u32>,
+) -> Option<Word> {
+    let expression = unwrap_expression(expression);
+    if !stable_method_call_offsets.contains(&expression.span().start.offset) {
+        return None;
+    }
+
+    let (object, method, argument_list) = match expression {
+        Expression::Call(Call::Method(call)) => (call.object, &call.method, &call.argument_list),
+        Expression::Call(Call::NullSafeMethod(call)) => (call.object, &call.method, &call.argument_list),
+        _ => return None,
+    };
+
+    if !argument_list.arguments.is_empty() {
+        return None;
+    }
+
+    let ClassLikeMemberSelector::Identifier(method) = method else {
+        return None;
+    };
+
+    let object_id = get_expression_id(object, this_class_name, resolved_names, codebase).or_else(|| {
+        get_stable_method_call_advisory_id(
+            object,
+            this_class_name,
+            resolved_names,
+            codebase,
+            stable_method_call_offsets,
+        )
+    })?;
+    let method_id = method.value;
+
+    Some(concat_word!(object_id.as_bytes(), b"->", method_id, b"()"))
 }
 
 fn get_extended_expression_id<'ast, 'arena>(

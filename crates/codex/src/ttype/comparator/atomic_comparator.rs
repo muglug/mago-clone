@@ -127,20 +127,27 @@ pub fn is_contained_by(
         }
     }
 
-    if inside_assertion
-        && let TAtomic::GenericParameter(TGenericParameter {
-            parameter_name: container_param_name,
-            defining_entity: container_entity,
-            ..
-        }) = container_type_part
+    if let TAtomic::GenericParameter(TGenericParameter {
+        parameter_name: container_param_name,
+        defining_entity: container_entity,
+        ..
+    }) = container_type_part
         && let TAtomic::GenericParameter(TGenericParameter {
             parameter_name: input_param_name,
             defining_entity: input_entity,
             ..
         }) = input_type_part
     {
+        if input_param_name == container_param_name && input_entity == container_entity {
+            // A flow-refined constraint still belongs to the same template.
+            // Recognize that identity before the mixed-constraint coercion
+            // path below can turn a successful comparison into a nested-mixed
+            // diagnostic.
+            return true;
+        }
+
         // Different template parameters are not contained by each other during assertion reconciliation
-        if input_param_name != container_param_name || input_entity != container_entity {
+        if inside_assertion {
             return false;
         }
     }
@@ -434,7 +441,14 @@ pub fn is_contained_by(
             ..
         }) = input_type_part
     {
-        if inside_assertion && (input_param_name != container_param_name || input_entity != container_entity) {
+        if input_param_name == container_param_name && input_entity == container_entity {
+            // These atomics denote the same template variable. Its constraint
+            // can be refined by control flow or an assertion contract, but
+            // that refinement does not create a different template type.
+            return true;
+        }
+
+        if inside_assertion {
             return false;
         }
 

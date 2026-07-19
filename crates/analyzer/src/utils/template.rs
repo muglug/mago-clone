@@ -159,7 +159,11 @@ where
                     },
                     parent_class: declaring_class_meta.and_then(|m| m.direct_parent_class),
                     function_is_final: calling_class_meta.is_some_and(|m| m.flags.is_final()),
-                    expand_templates: true,
+                    // This map feeds the inferred-template replacer. Expanding
+                    // a generic argument here substitutes its constraint
+                    // before the member signature can bind it, losing chains
+                    // such as `Child<U> -> Parent<U> -> property<T>`.
+                    expand_templates: false,
                     ..Default::default()
                 },
             );

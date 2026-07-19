@@ -12,6 +12,7 @@ pub mod conditional;
 pub mod docblock;
 pub mod experimental;
 pub mod expression;
+pub mod guarded_expression;
 pub mod misc;
 pub mod missing_type_hints;
 pub mod names;

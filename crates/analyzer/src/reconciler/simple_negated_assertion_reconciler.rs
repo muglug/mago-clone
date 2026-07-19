@@ -3,12 +3,14 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use mago_codex::assertion::Assertion;
+use mago_codex::identifier::function_like::FunctionLikeIdentifier;
 use mago_codex::ttype::TType;
 use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::array::keyed::TKeyedArray;
 use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::callable::TCallable;
 use mago_codex::ttype::atomic::mixed::truthiness::TMixedTruthiness;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::object::named::TNamedObject;
@@ -17,6 +19,7 @@ use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::bool::TBool;
 use mago_codex::ttype::atomic::scalar::float::TFloat;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
+use mago_codex::ttype::cast::cast_atomic_to_callable;
 use mago_codex::ttype::comparator::union_comparator;
 use mago_codex::ttype::get_mixed;
 use mago_codex::ttype::get_never;
@@ -179,7 +182,8 @@ where
                 ));
             }
             TAtomic::Array(TArray::Keyed(TKeyedArray { known_items: None, parameters: Some(parameters), .. }))
-                if parameters.0.is_placeholder() && parameters.1.is_placeholder() =>
+                if (parameters.0.is_placeholder() && parameters.1.is_placeholder())
+                    || (parameters.0.is_array_key() && parameters.1.is_mixed()) =>
             {
                 return Some(subtract_keyed_array(
                     context,
@@ -204,6 +208,9 @@ where
                     span,
                     *resource_to_subtract,
                 ));
+            }
+            TAtomic::Callable(_) => {
+                return Some(subtract_callable(context, existing_var_type));
             }
             TAtomic::Mixed(mixed) if mixed.is_non_null() => {
                 return Some(intersect_null(context, assertion, existing_var_type, key, negated, span));
@@ -288,6 +295,38 @@ where
             Some(new_var_type)
         }
         _ => None,
+    }
+}
+
+fn subtract_callable<A>(context: &Context<'_, '_, A>, existing_var_type: &TUnion) -> TUnion
+where
+    A: Arena,
+{
+    let acceptable_types = existing_var_type
+        .types
+        .iter()
+        .filter(|atomic| !atomic_is_definitely_callable(context, atomic))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if acceptable_types.is_empty() { get_never() } else { existing_var_type.clone_with_types(acceptable_types) }
+}
+
+fn atomic_is_definitely_callable<A>(context: &Context<'_, '_, A>, atomic: &TAtomic) -> bool
+where
+    A: Arena,
+{
+    let Some(callable) = cast_atomic_to_callable(atomic, context.codebase, None) else {
+        return false;
+    };
+
+    match callable.as_ref() {
+        TCallable::Signature(_) => true,
+        TCallable::Alias(FunctionLikeIdentifier::Function(name)) => context.codebase.function_exists(name.as_bytes()),
+        TCallable::Alias(FunctionLikeIdentifier::Method(class, method)) => {
+            context.codebase.method_exists(class.as_bytes(), method.as_bytes())
+        }
+        TCallable::Alias(FunctionLikeIdentifier::Closure(_)) => true,
     }
 }
 
@@ -521,6 +560,32 @@ where
             did_remove_type = true;
 
             if is_equality {
+                acceptable_types.push(atomic);
+            }
+        } else if let TAtomic::Array(TArray::List(_)) = &atomic {
+            // A list is still an array. Assertions such as `is_array()` are
+            // represented by the general keyed-array atomic, so their
+            // negation must also subtract list constraints. Keeping the list
+            // here can make a generic `T as string|list<mixed>` reconcile to
+            // an impossible type on the false branch.
+            let assertion_union = TUnion::from_atomic(assertion.get_type().expect("array assertion").clone());
+            let input_union = TUnion::from_atomic(atomic.clone());
+            let list_is_covered = union_comparator::is_contained_by(
+                context.codebase,
+                &input_union,
+                &assertion_union,
+                false,
+                false,
+                true,
+                &mut mago_codex::ttype::comparator::ComparisonResult::new(),
+            );
+
+            if list_is_covered {
+                did_remove_type = true;
+                if is_equality {
+                    acceptable_types.push(atomic);
+                }
+            } else {
                 acceptable_types.push(atomic);
             }
         } else {

@@ -96,7 +96,13 @@ where
             );
         }
 
-        if let BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_) = binary.operator {
+        if matches!(
+            binary.operator,
+            BinaryOperator::Equal(_)
+                | BinaryOperator::NotEqual(_)
+                | BinaryOperator::Identical(_)
+                | BinaryOperator::NotIdentical(_)
+        ) {
             let check_boolean = |expr: &Expression| -> (bool, bool) {
                 if expr.is_true() {
                     return (true, false);
@@ -117,7 +123,9 @@ where
                 })
             };
 
-            let is_identical = matches!(binary.operator, BinaryOperator::Identical(_));
+            let is_positive_comparison =
+                matches!(binary.operator, BinaryOperator::Equal(_) | BinaryOperator::Identical(_));
+            let is_strict = matches!(binary.operator, BinaryOperator::Identical(_) | BinaryOperator::NotIdentical(_));
             let (left_is_true, left_is_false) = check_boolean(binary.lhs);
             let (right_is_true, right_is_false) = check_boolean(binary.rhs);
 
@@ -129,17 +137,23 @@ where
                         assertion_context.resolved_names,
                         Some(assertion_context.codebase),
                     ) {
-                        let type_assertion = if left_is_true {
+                        let type_assertion = if is_strict && left_is_true {
                             Assertion::IsType(TAtomic::Scalar(TScalar::r#true()))
-                        } else {
+                        } else if is_strict {
                             Assertion::IsType(TAtomic::Scalar(TScalar::r#false()))
+                        } else if left_is_true {
+                            Assertion::Truthy
+                        } else {
+                            Assertion::Falsy
                         };
 
-                        let assertion = if is_identical {
+                        let assertion = if is_positive_comparison {
                             type_assertion
                         } else {
                             match type_assertion {
                                 Assertion::IsType(t) => Assertion::IsNotType(t),
+                                Assertion::Truthy => Assertion::Falsy,
+                                Assertion::Falsy => Assertion::Truthy,
                                 #[allow(clippy::unreachable)]
                                 _ => unreachable!(),
                             }
@@ -175,7 +189,7 @@ where
                         formula_size_threshold,
                     )?;
 
-                    let should_negate = if is_identical { left_is_false } else { left_is_true };
+                    let should_negate = if is_positive_comparison { left_is_false } else { left_is_true };
                     return if should_negate { negate_formula(formula, algebra_thresholds) } else { Some(formula) };
                 }
                 (_, true) => {
@@ -185,17 +199,23 @@ where
                         assertion_context.resolved_names,
                         Some(assertion_context.codebase),
                     ) {
-                        let type_assertion = if right_is_true {
+                        let type_assertion = if is_strict && right_is_true {
                             Assertion::IsType(TAtomic::Scalar(TScalar::r#true()))
-                        } else {
+                        } else if is_strict {
                             Assertion::IsType(TAtomic::Scalar(TScalar::r#false()))
+                        } else if right_is_true {
+                            Assertion::Truthy
+                        } else {
+                            Assertion::Falsy
                         };
 
-                        let assertion = if is_identical {
+                        let assertion = if is_positive_comparison {
                             type_assertion
                         } else {
                             match type_assertion {
                                 Assertion::IsType(t) => Assertion::IsNotType(t),
+                                Assertion::Truthy => Assertion::Falsy,
+                                Assertion::Falsy => Assertion::Truthy,
                                 #[allow(clippy::unreachable)]
                                 _ => unreachable!(),
                             }
@@ -231,7 +251,7 @@ where
                         formula_size_threshold,
                     )?;
 
-                    let should_negate = if is_identical { right_is_false } else { right_is_true };
+                    let should_negate = if is_positive_comparison { right_is_false } else { right_is_true };
                     return if should_negate { negate_formula(formula, algebra_thresholds) } else { Some(formula) };
                 }
                 _ => {}
@@ -491,7 +511,6 @@ fn push_not_null_clause<A>(
 ///
 /// Returns `None` if the formula's complexity exceeds the provided `formula_size_threshold`,
 /// to avoid performance degradation.
-#[allow(dead_code)]
 pub fn get_disjunctive_equality_formula<A>(
     subject: &Expression,
     conditions: Vec<&Expression>,

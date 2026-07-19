@@ -179,7 +179,12 @@ where
             .target
             .get_function_like_metadata()
             .and_then(|metadata| metadata.method_metadata.as_ref())
-            .is_some_and(|metadata| metadata.is_final);
+            .is_some_and(|metadata| metadata.is_final)
+            // A direct `ConcreteClass::method()` call fixes PHP's called
+            // scope to that class even when the method or class is not final.
+            // Late-static types in its return therefore resolve to the named
+            // receiver rather than `ConcreteClass&static`.
+            || matches!(method_context.class_type, StaticClassType::Name(_));
 
         if let Some(declaring_method_id) = &method_context.declaring_method_id {
             let declaring_class_name = declaring_method_id.get_class_name();

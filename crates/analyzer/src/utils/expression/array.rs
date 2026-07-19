@@ -14,6 +14,8 @@ use mago_codex::ttype::atomic::TAtomic;
 use mago_codex::ttype::atomic::array::TArray;
 use mago_codex::ttype::atomic::array::key::ArrayKey;
 use mago_codex::ttype::atomic::array::list::TList;
+use mago_codex::ttype::atomic::derived::TDerived;
+use mago_codex::ttype::atomic::derived::index_access::TIndexAccess;
 use mago_codex::ttype::atomic::object::TObject;
 use mago_codex::ttype::atomic::scalar::TScalar;
 use mago_codex::ttype::atomic::scalar::int::TInteger;
@@ -116,6 +118,41 @@ where
     if array_like_type.is_never() || index_type.is_never() {
         return get_never();
     }
+
+    // Keep the relationship between a generic array and a generic key for
+    // reads. Walking the template constraint below is still necessary for
+    // validating the access, but its value type is only an upper bound: the
+    // precise result is `T[K]` and may be specialized at a later call site.
+    let generic_index_access = if !in_assignment && array_like_type.is_single() {
+        match (array_like_type.get_single(), index_type.get_single()) {
+            (TAtomic::GenericParameter(parameter), TAtomic::GenericParameter(index_parameter))
+                if parameter.constraint.types.iter().all(|atomic| matches!(atomic, TAtomic::Array(_)))
+                    && (index_parameter.constraint.is_array_key()
+                        || index_parameter.constraint.types.iter().any(|atomic| {
+                            let TAtomic::Derived(TDerived::KeyOf(key_of)) = atomic else {
+                                return false;
+                            };
+
+                            key_of.get_target_type().types.iter().any(|target| {
+                                matches!(
+                                    target,
+                                    TAtomic::GenericParameter(target_parameter)
+                                        if target_parameter.parameter_name == parameter.parameter_name
+                                            && target_parameter.defining_entity == parameter.defining_entity
+                                )
+                            })
+                        })) =>
+            {
+                Some(TUnion::from_atomic(TAtomic::Derived(TDerived::IndexAccess(TIndexAccess::new(
+                    TUnion::from_atomic(TAtomic::GenericParameter(parameter.clone())),
+                    index_type.clone(),
+                )))))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     if index_type.is_null() && !index_type.is_keyed_array() {
         context.collector.report_with_code(
@@ -504,6 +541,10 @@ where
 
     match value_type {
         Some(mut value_type) => {
+            if let Some(generic_index_access) = generic_index_access {
+                value_type = generic_index_access;
+            }
+
             if array_like_type.possibly_undefined() {
                 value_type.set_possibly_undefined(true, None);
             }

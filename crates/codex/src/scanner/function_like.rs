@@ -11,8 +11,10 @@ use mago_reporting::Annotation;
 use mago_reporting::Issue;
 use mago_span::HasSpan;
 use mago_span::Span;
+use mago_syntax::cst::Access;
 use mago_syntax::cst::ArrowFunction;
 use mago_syntax::cst::Block;
+use mago_syntax::cst::ClassLikeMemberSelector;
 use mago_syntax::cst::Closure;
 use mago_syntax::cst::Expression;
 use mago_syntax::cst::ForBody;
@@ -152,6 +154,10 @@ where
     );
 
     if let MethodBody::Concrete(block) = &method.body {
+        if metadata.parameters.is_empty() && block_is_simple_property_getter(block) {
+            metadata.flags |= MetadataFlags::SIMPLE_PROPERTY_GETTER;
+        }
+
         infer_assertions_from_block_body(block, &mut metadata, context.resolved_names);
     }
 
@@ -167,6 +173,25 @@ where
     }
 
     Some(metadata)
+}
+
+/// Recognizes the narrow getter shape used only to explain repeated-call
+/// diagnostics. The return value is never cached or inserted into flow state.
+fn block_is_simple_property_getter(block: &Block<'_>) -> bool {
+    let [Statement::Return(return_statement)] = block.statements.as_slice() else {
+        return false;
+    };
+
+    let Some(Expression::Access(Access::Property(property_access))) =
+        return_statement.value.map(Expression::unparenthesized)
+    else {
+        return false;
+    };
+
+    matches!(
+        property_access.object.unparenthesized(),
+        Expression::Variable(Variable::Direct(variable)) if variable.name == b"$this"
+    ) && matches!(property_access.property, ClassLikeMemberSelector::Identifier(_))
 }
 
 #[inline]
